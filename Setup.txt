@@ -1,0 +1,10 @@
+Load packages:
+pip install -r requirements.txt
+
+Build benchmark:
+cd Benchmarks
+python benchmark.py
+
+Visualize Graph:
+cd Benchmarks
+python plot_results.py
