@@ -1,3 +1,4 @@
+Benchmakring methoden:
 Everything at once(wie jetzt)
 Aufbauend (circuits mit log aufsteigender gatter anzahl)
 

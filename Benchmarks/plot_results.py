@@ -1,7 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv("../results/benchmark_results.csv")
+df = pd.read_csv("../results/benchmark_results_V2.csv")
 
 for benchmark in df["benchmark"].unique():
 

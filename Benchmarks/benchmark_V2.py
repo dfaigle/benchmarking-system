@@ -13,12 +13,21 @@ from datetime import datetime
 RESULT_DIR = Path("../results")
 RESULT_DIR.mkdir(exist_ok=True)
 
-CSV_FILE = RESULT_DIR / "benchmark_results.csv"
-
 REPEATS = 20
 
 QUBIT_CONFIGS = [2, 3, 4]
 GATE_CONFIGS = [100, 1000, 5000]
+
+# =========================================================
+# Nächste CSV Version bestimmen
+# =========================================================
+
+version = 1
+while True:
+    CSV_FILE = RESULT_DIR / f"benchmark_results_V{version}.csv"
+    if not CSV_FILE.exists():
+        break
+    version += 1
 
 # =========================================================
 # Circuit Builder
@@ -77,8 +86,7 @@ def create_cached_qnode(num_qubits, total_gates):
 def measure_runtime(func, repeats=10):
     times = []
 
-    # Warmup
-    func()
+    func()  # warmup
 
     for _ in range(repeats):
         gc.collect()
@@ -97,7 +105,7 @@ def measure_runtime(func, repeats=10):
     }
 
 # =========================================================
-# Main Benchmark Loop
+# Benchmark Loop
 # =========================================================
 
 results = []
@@ -107,10 +115,7 @@ for num_qubits in QUBIT_CONFIGS:
 
         print(f"\nQubits={num_qubits} Gates={total_gates}")
 
-        cached_qnode = create_cached_qnode(
-            num_qubits,
-            total_gates         
-        )
+        cached_qnode = create_cached_qnode(num_qubits, total_gates)
 
         benchmarks = [
             ("tape", lambda: benchmark_tape(num_qubits, total_gates)),
@@ -119,11 +124,10 @@ for num_qubits in QUBIT_CONFIGS:
         ]
 
         for name, func in benchmarks:
-            #output file hier generieren
-
             print(f"Running {name} ...")
 
             stats = measure_runtime(func, REPEATS)
+
             results.append({
                 "timestamp": datetime.now().isoformat(),
                 "benchmark": name,
@@ -134,11 +138,10 @@ for num_qubits in QUBIT_CONFIGS:
             })
 
 # =========================================================
-# Save CSV
+# Save CSV (versioned)
 # =========================================================
 
 df = pd.DataFrame(results)
-
 df.to_csv(CSV_FILE, index=False)
 
 print("\nSaved results:")
