@@ -88,12 +88,12 @@ RESULT_DIR = Path("../results")
 RESULT_DIR.mkdir(exist_ok=True)
 
 SEED    = 42
-REPEATS = 5
+REPEATS = 4
 
-QUBIT_CONFIGS = [15]
+QUBIT_CONFIGS = [10]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(100_000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
 # [    10     16     26     43     70    113    183    298    483
 #      785   1274   2069   3360   5456   8859  14384  23357  37927
@@ -191,43 +191,41 @@ def apply_gate(gate_name: str, wires: list, params: list) -> None:
 
 # ------ CREATION ------
 # Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
+# Device-Erstellung ist für alle drei ausgelagert (gleiche Baseline).
 #
-#   Tape:         QuantumTape-Kontext befüllen (ohne execute)
-#   QNode no cache: neue QNode-Funktion definieren + ersten Aufruf (Tracing)
-#   QNode cached:   neue QNode-Funktion definieren + ersten Aufruf (Tracing + Caching)
+#   Tape:           QuantumTape-Kontext befüllen (kein execute)
+#   QNode no cache: QNode-Funktion definieren + ersten Aufruf (Tracing)
+#   QNode cached:   QNode-Funktion definieren + ersten Aufruf (Tracing + Caching)
 
 def runner_creation_tape(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
-
     def run():
         with qml.tape.QuantumTape() as _tape:
             for gn, ws, ps in gate_sequence:
                 apply_gate(gn, ws, ps)
             qml.probs(wires=range(num_qubits))
-        # Tape ist gebaut, aber nicht ausgeführt
 
     return run
 
 
 def runner_creation_qnode_nc(num_qubits: int, gate_sequence: list):
-    def run():
-        dev = qml.device("default.qubit", wires=num_qubits)
+    dev = qml.device("default.qubit", wires=num_qubits)
 
+    def run():
         @qml.qnode(dev, cache=False)
         def circuit():
             for gn, ws, ps in gate_sequence:
                 apply_gate(gn, ws, ps)
             return qml.probs(wires=range(num_qubits))
 
-        circuit()   # erster Aufruf = Tracing + Kompilierung
+        circuit()   # erster Aufruf = Tracing
 
     return run
 
 
 def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
-    def run():
-        dev = qml.device("default.qubit", wires=num_qubits)
+    dev = qml.device("default.qubit", wires=num_qubits)
 
+    def run():
         @qml.qnode(dev, cache=True)
         def circuit():
             for gn, ws, ps in gate_sequence:
@@ -242,9 +240,9 @@ def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
 # ------ EXECUTION ------
 # Misst: wie lange dauert die Simulation nach dem Aufbau?
 #
-#   Tape:          qml.execute([tape], dev) — tape ist vorgebaut
-#   QNode no cache: circuit()-Aufruf (retract bei jedem Aufruf, da cache=False)
-#   QNode cached:   circuit()-Aufruf (Graph aus Cache, nur Simulation neu)
+#   Tape:           qml.execute([tape], dev) — tape ist vorgebaut
+#   QNode no cache: circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=False)
+#   QNode cached:   circuit()-Aufruf mit gecachtem Graph, nur Simulation neu (cache=True)
 
 def runner_execution_tape(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
@@ -286,30 +284,30 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 
 
 # ------ GRADIENT ------
-# Misst: Gradienten-Berechnung via Parameter-Shift (fair für alle drei)
+# Misst: reine Ausführungszeit der Gradienten-Berechnung via Parameter-Shift.
+# Tape und grad_tapes werden einmalig vorgebaut (analog zur QNode-Vorbereitung).
 #
 #   Trainierbare Schicht: RY(params[i]) pro Qubit, dann Gate-Block
 #   Ausgabe: Erwartungswert ⟨Z₀⟩
 #
-#   Tape:          param_shift-Gradienten-Tapes aufbauen + ausführen
-#   QNode no cache: qml.grad(circuit)(params)  (cache=False)
-#   QNode cached:   qml.grad(circuit)(params)  (cache=True)
+#   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
+#   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
+#   QNode cached:   qml.grad(circuit)(params) — nur Simulation (Graph gecacht)
 
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    dev    = qml.device("default.qubit", wires=num_qubits)
+    params = pnp.array(np.zeros(num_qubits), requires_grad=True)
+
+    with qml.tape.QuantumTape() as tape:
+        for i in range(num_qubits):
+            qml.RY(params[i], wires=i)
+        for gn, ws, ps in gate_sequence:
+            apply_gate(gn, ws, ps)
+        qml.expval(qml.PauliZ(0))
+
+    grad_tapes, fn = qml.gradients.param_shift(tape)
 
     def run():
-        # pnp.array mit requires_grad=True → param_shift erkennt trainierbare Parameter
-        params = pnp.array(np.zeros(num_qubits), requires_grad=True)
-
-        with qml.tape.QuantumTape() as tape:
-            for i in range(num_qubits):
-                qml.RY(params[i], wires=i)
-            for gn, ws, ps in gate_sequence:
-                apply_gate(gn, ws, ps)
-            qml.expval(qml.PauliZ(0))
-
-        grad_tapes, fn = qml.gradients.param_shift(tape)
         results = qml.execute(grad_tapes, dev)
         return fn(results)
 
@@ -443,33 +441,35 @@ print(f"\nErgebnisse gespeichert: {CSV_FILE}")
 
 def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
     qubit_vals = sorted(df["num_qubits"].unique())
-    palette    = plt.cm.Set2.colors
     gate_set   = df["gate_set"].iloc[0]
     mode       = df["benchmark_mode"].iloc[0]
     mode_label = MODE_LABELS[mode]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    method_cfg = [
+        ("Tape",              "tape_avg", "tape_std", "tab:blue"),
+        ("QNode (no cache)",  "qnc_avg",  "qnc_std",  "tab:orange"),
+        ("QNode (cached)",    "qc_avg",   "qc_std",   "tab:green"),
+    ]
+
+    n_qubits = len(qubit_vals)
+    fig, axes = plt.subplots(1, n_qubits, figsize=(6 * n_qubits, 5), squeeze=False)
+    axes = axes[0]
+
     fig.suptitle(
         f"{mode_label}  |  Gate-Set: {gate_set!r}  ({', '.join(ACTIVE_GATE_SET)})",
         fontsize=13, fontweight="bold", y=1.02,
     )
 
-    subplot_cfg = [
-        ("Tape",          "tape_avg", "tape_std"),
-        ("QNode  (no cache)", "qnc_avg",  "qnc_std"),
-        ("QNode  (cached)",   "qc_avg",   "qc_std"),
-    ]
+    for ax, nq in zip(axes, qubit_vals):
+        sub = df[df["num_qubits"] == nq].sort_values("total_gates")
+        x   = sub["total_gates"].values
 
-    for ax, (method_label, col_avg, col_std) in zip(axes, subplot_cfg):
-        for i, nq in enumerate(qubit_vals):
-            sub   = df[df["num_qubits"] == nq].sort_values("total_gates")
-            color = palette[i % len(palette)]
-            x     = sub["total_gates"].values
-            y     = sub[col_avg].values
-            s     = sub[col_std].values
+        for method_label, col_avg, col_std, color in method_cfg:
+            y = sub[col_avg].values
+            s = sub[col_std].values
 
             ax.plot(x, y, marker="o", linewidth=1.8, markersize=4,
-                    label=f"{nq} Qubits", color=color)
+                    label=method_label, color=color)
             ax.fill_between(x, np.maximum(y - s, 1e-9), y + s,
                             alpha=0.18, color=color)
 
@@ -477,7 +477,7 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
         ax.set_yscale("log")
         ax.set_xlabel("Anzahl Gatter", fontsize=11)
         ax.set_ylabel("Zeit (s)", fontsize=11)
-        ax.set_title(method_label, fontsize=12, fontweight="bold")
+        ax.set_title(f"{nq} Qubits", fontsize=12, fontweight="bold")
         ax.legend(fontsize=9)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.6)
         ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
