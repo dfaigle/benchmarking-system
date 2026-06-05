@@ -5,6 +5,5 @@ Build benchmark:
 cd Benchmarks
 python benchmark.py
 
-Visualize Graph:
-cd Benchmarks
-python plot_results.py
+Replot results:
+python .\plot_results.py .\Results\ENTER_BENCHMARK.csv
