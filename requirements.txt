@@ -2,3 +2,4 @@ pennylane
 numpy
 pandas
 matplotlib
+qiskit
