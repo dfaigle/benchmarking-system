@@ -3,7 +3,8 @@ pip install -r requirements.txt
 
 Build benchmark:
 cd Benchmarks
-python benchmark.py
+python logarithmic_benchmark_pennylane.py
+python logarithmic_benchmark_qiskit.py
 
 Replot results:
 python .\plot_results.py .\Results\ENTER_BENCHMARK.csv
