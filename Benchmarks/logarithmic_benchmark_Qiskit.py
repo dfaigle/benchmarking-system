@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import gc
 import time
+import tracemalloc
 from pathlib import Path
 from datetime import datetime
 
@@ -55,7 +56,7 @@ GATE_SET_CHOICE = "non_clifford"
 #                  est:  StatevectorEstimator + manueller Param-Shift
 #                  estt: StatevectorEstimator + Param-Shift (vorkompiliert)
 #
-BENCHMARK_MODE = "execution"
+BENCHMARK_MODE = "gradient"
 
 # =========================================================
 # Gate-Definitionen 
@@ -105,7 +106,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [10]
+QUBIT_CONFIGS = [5, 10, 15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -395,6 +396,31 @@ def measure_runtime(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
+# Speicher-Messung (Peak via tracemalloc)
+# =========================================================
+# Misst den Peak der Python-Allokationen während func() läuft.
+# Reproduzierbar und erfasst die hier dominante Last (Circuit-/Gate-Objekte).
+# NumPy-C-Buffer werden bewusst nicht erfasst (bei 10-15 Qubits vernachlässigbar).
+# Getrennt vom Timing, da tracemalloc die Laufzeit verfälschen würde.
+
+def measure_memory(func, repeats: int = 5) -> dict:
+    func()  # Warm-up (lazy Imports/Caches nicht mitmessen)
+    peaks = []
+    for _ in range(repeats):
+        gc.collect()
+        tracemalloc.start()
+        func()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        peaks.append(peak / 1024**2)   # MiB
+    return {
+        "avg": float(np.mean(peaks)),
+        "std": float(np.std(peaks)),
+        "min": float(np.min(peaks)),
+        "max": float(np.max(peaks)),
+    }
+
+# =========================================================
 # Benchmark-Schleife
 # =========================================================
 
@@ -407,14 +433,22 @@ for num_qubits in QUBIT_CONFIGS:
 
         gate_sequence = generate_gate_sequence(num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED)
 
-        qc_stats   = measure_runtime(build_qc(num_qubits,   gate_sequence), REPEATS)
-        est_stats  = measure_runtime(build_est(num_qubits,  gate_sequence), REPEATS)
-        estt_stats = measure_runtime(build_estt(num_qubits, gate_sequence), REPEATS)
+        qc_runner   = build_qc(num_qubits,   gate_sequence)
+        est_runner  = build_est(num_qubits,  gate_sequence)
+        estt_runner = build_estt(num_qubits, gate_sequence)
+
+        qc_stats   = measure_runtime(qc_runner,   REPEATS)
+        est_stats  = measure_runtime(est_runner,  REPEATS)
+        estt_stats = measure_runtime(estt_runner, REPEATS)
+
+        qc_mem   = measure_memory(qc_runner,   REPEATS)
+        est_mem  = measure_memory(est_runner,  REPEATS)
+        estt_mem = measure_memory(estt_runner, REPEATS)
 
         print(
-            f"  qc={qc_stats['avg']:.5f}s  "
-            f"est={est_stats['avg']:.5f}s  "
-            f"estt={estt_stats['avg']:.5f}s"
+            f"  qc={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB  "
+            f"est={est_stats['avg']:.5f}s/{est_mem['avg']:.1f}MiB  "
+            f"estt={estt_stats['avg']:.5f}s/{estt_mem['avg']:.1f}MiB"
         )
 
         results.append({
@@ -423,9 +457,12 @@ for num_qubits in QUBIT_CONFIGS:
             "benchmark_mode": BENCHMARK_MODE,
             "num_qubits":     num_qubits,
             "total_gates":    total_gates,
-            **{f"qc_{k}":   v for k, v in qc_stats.items()},
-            **{f"est_{k}":  v for k, v in est_stats.items()},
-            **{f"estt_{k}": v for k, v in estt_stats.items()},
+            **{f"qc_{k}":       v for k, v in qc_stats.items()},
+            **{f"est_{k}":      v for k, v in est_stats.items()},
+            **{f"estt_{k}":     v for k, v in estt_stats.items()},
+            **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
+            **{f"est_mem_{k}":  v for k, v in est_mem.items()},
+            **{f"estt_mem_{k}": v for k, v in estt_mem.items()},
         })
 
 # =========================================================
@@ -440,16 +477,21 @@ print(f"\nErgebnisse gespeichert: {CSV_FILE}")
 # Plot  (3 Subplots: QC + Statevector | Estimator | Estimator transpiliert)
 # =========================================================
 
-def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
+def plot_metric(
+    df: pd.DataFrame,
+    avg_suffix: str,
+    std_suffix: str,
+    ylabel: str,
+    title: str,
+    save_path: Path | None = None,
+) -> None:
     qubit_vals = sorted(df["num_qubits"].unique())
     gate_set   = df["gate_set"].iloc[0]
-    mode       = df["benchmark_mode"].iloc[0]
-    mode_label = MODE_LABELS[mode]
 
     method_cfg = [
-        ("QuantumCircuit + Statevector", "qc_avg",   "qc_std",   "tab:blue"),
-        ("Estimator (kein Transpile)",   "est_avg",  "est_std",  "tab:orange"),
-        ("Estimator (transpiliert)",     "estt_avg", "estt_std", "tab:green"),
+        ("QuantumCircuit + Statevector", f"qc_{avg_suffix}",   f"qc_{std_suffix}",   "tab:blue"),
+        ("Estimator (kein Transpile)",   f"est_{avg_suffix}",  f"est_{std_suffix}",  "tab:orange"),
+        ("Estimator (transpiliert)",     f"estt_{avg_suffix}", f"estt_{std_suffix}", "tab:green"),
     ]
 
     n_qubits = len(qubit_vals)
@@ -457,7 +499,7 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
     axes = axes[0]
 
     fig.suptitle(
-        f"Qiskit – {mode_label}  |  Gate-Set: {gate_set!r}",
+        f"Qiskit – {title}  |  Gate-Set: {gate_set!r}",
         fontsize=13, fontweight="bold", y=1.02,
     )
 
@@ -476,7 +518,7 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Anzahl Gatter", fontsize=11)
-        ax.set_ylabel("Zeit (s)", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
         ax.set_title(f"{nq} Qubits", fontsize=12, fontweight="bold")
         ax.legend(fontsize=9)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.6)
@@ -492,5 +534,20 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
     plt.show()
 
 
+mode_label = MODE_LABELS[BENCHMARK_MODE]
+
+# --- Laufzeit ---
 PLOT_FILE = RESULT_DIR / f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_V{version}.png"
-plot_results(df, save_path=PLOT_FILE)
+plot_metric(
+    df, avg_suffix="avg", std_suffix="std",
+    ylabel="Zeit (s)", title=mode_label,
+    save_path=PLOT_FILE,
+)
+
+# --- Speicherverbrauch (Peak, tracemalloc) ---
+MEM_PLOT_FILE = RESULT_DIR / f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_mem_V{version}.png"
+plot_metric(
+    df, avg_suffix="mem_avg", std_suffix="mem_std",
+    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+    save_path=MEM_PLOT_FILE,
+)

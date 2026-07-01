@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import gc
 import time
+import tracemalloc
 from pathlib import Path
 from datetime import datetime
 
@@ -90,7 +91,7 @@ RESULT_DIR.mkdir(exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [10, 15]
+QUBIT_CONFIGS = [5, 10, 15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -392,6 +393,31 @@ def measure_runtime(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
+# Speicher-Messung (Peak via tracemalloc)
+# =========================================================
+# Misst den Peak der Python-Allokationen während func() läuft.
+# Reproduzierbar und erfasst die hier dominante Last (Op-/Tape-Objekte).
+# NumPy-C-Buffer werden bewusst nicht erfasst (bei 10-15 Qubits vernachlässigbar).
+# Getrennt vom Timing, da tracemalloc die Laufzeit verfälschen würde.
+
+def measure_memory(func, repeats: int = 5) -> dict:
+    func()      # Warm-up (lazy Imports/Caches nicht mitmessen)
+    peaks = []
+    for _ in range(repeats):
+        gc.collect()
+        tracemalloc.start()
+        func()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        peaks.append(peak / 1024**2)   # MiB
+    return {
+        "avg": float(np.mean(peaks)),
+        "std": float(np.std(peaks)),
+        "min": float(np.min(peaks)),
+        "max": float(np.max(peaks)),
+    }
+
+# =========================================================
 # Benchmark-Schleife
 # =========================================================
 
@@ -406,14 +432,22 @@ for num_qubits in QUBIT_CONFIGS:
             num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
         )
 
-        tape_stats = measure_runtime(build_tape(num_qubits, gate_sequence), REPEATS)
-        qnc_stats  = measure_runtime(build_qnc(num_qubits,  gate_sequence), REPEATS)
-        qc_stats   = measure_runtime(build_qc(num_qubits,   gate_sequence), REPEATS)
+        tape_runner = build_tape(num_qubits, gate_sequence)
+        qnc_runner  = build_qnc(num_qubits,  gate_sequence)
+        qc_runner   = build_qc(num_qubits,   gate_sequence)
+
+        tape_stats = measure_runtime(tape_runner, REPEATS)
+        qnc_stats  = measure_runtime(qnc_runner,  REPEATS)
+        qc_stats   = measure_runtime(qc_runner,   REPEATS)
+
+        tape_mem = measure_memory(tape_runner, REPEATS)
+        qnc_mem  = measure_memory(qnc_runner,  REPEATS)
+        qc_mem   = measure_memory(qc_runner,   REPEATS)
 
         print(
-            f"  tape={tape_stats['avg']:.5f}s  "
-            f"qnode_nc={qnc_stats['avg']:.5f}s  "
-            f"qnode_c={qc_stats['avg']:.5f}s"
+            f"  tape={tape_stats['avg']:.5f}s/{tape_mem['avg']:.1f}MiB  "
+            f"qnode_nc={qnc_stats['avg']:.5f}s/{qnc_mem['avg']:.1f}MiB  "
+            f"qnode_c={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB"
         )
 
         results.append({
@@ -422,9 +456,12 @@ for num_qubits in QUBIT_CONFIGS:
             "benchmark_mode": BENCHMARK_MODE,
             "num_qubits":     num_qubits,
             "total_gates":    total_gates,
-            **{f"tape_{k}": v for k, v in tape_stats.items()},
-            **{f"qnc_{k}":  v for k, v in qnc_stats.items()},
-            **{f"qc_{k}":   v for k, v in qc_stats.items()},
+            **{f"tape_{k}":     v for k, v in tape_stats.items()},
+            **{f"qnc_{k}":      v for k, v in qnc_stats.items()},
+            **{f"qc_{k}":       v for k, v in qc_stats.items()},
+            **{f"tape_mem_{k}": v for k, v in tape_mem.items()},
+            **{f"qnc_mem_{k}":  v for k, v in qnc_mem.items()},
+            **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
         })
 
 # =========================================================
@@ -439,16 +476,21 @@ print(f"\nErgebnisse gespeichert: {CSV_FILE}")
 # Plot  (3 Subplots: Tape | QNode no cache | QNode cached)
 # =========================================================
 
-def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
+def plot_metric(
+    df: pd.DataFrame,
+    avg_suffix: str,
+    std_suffix: str,
+    ylabel: str,
+    title: str,
+    save_path: Path | None = None,
+) -> None:
     qubit_vals = sorted(df["num_qubits"].unique())
     gate_set   = df["gate_set"].iloc[0]
-    mode       = df["benchmark_mode"].iloc[0]
-    mode_label = MODE_LABELS[mode]
 
     method_cfg = [
-        ("Tape",              "tape_avg", "tape_std", "tab:blue"),
-        ("QNode (no cache)",  "qnc_avg",  "qnc_std",  "tab:orange"),
-        ("QNode (cached)",    "qc_avg",   "qc_std",   "tab:green"),
+        ("Tape",              f"tape_{avg_suffix}", f"tape_{std_suffix}", "tab:blue"),
+        ("QNode (no cache)",  f"qnc_{avg_suffix}",  f"qnc_{std_suffix}",  "tab:orange"),
+        ("QNode (cached)",    f"qc_{avg_suffix}",   f"qc_{std_suffix}",   "tab:green"),
     ]
 
     n_qubits = len(qubit_vals)
@@ -456,7 +498,7 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
     axes = axes[0]
 
     fig.suptitle(
-        f"{mode_label}  |  Gate-Set: {gate_set!r}  ({', '.join(ACTIVE_GATE_SET)})",
+        f"{title}  |  Gate-Set: {gate_set!r}  ({', '.join(ACTIVE_GATE_SET)})",
         fontsize=13, fontweight="bold", y=1.02,
     )
 
@@ -476,7 +518,7 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Anzahl Gatter", fontsize=11)
-        ax.set_ylabel("Zeit (s)", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
         ax.set_title(f"{nq} Qubits", fontsize=12, fontweight="bold")
         ax.legend(fontsize=9)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.6)
@@ -492,5 +534,20 @@ def plot_results(df: pd.DataFrame, save_path: Path | None = None) -> None:
     plt.show()
 
 
+mode_label = MODE_LABELS[BENCHMARK_MODE]
+
+# --- Laufzeit ---
 PLOT_FILE = RESULT_DIR / f"benchmark_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_V{version}.png"
-plot_results(df, save_path=PLOT_FILE)
+plot_metric(
+    df, avg_suffix="avg", std_suffix="std",
+    ylabel="Zeit (s)", title=mode_label,
+    save_path=PLOT_FILE,
+)
+
+# --- Speicherverbrauch (Peak, tracemalloc) ---
+MEM_PLOT_FILE = RESULT_DIR / f"benchmark_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_mem_V{version}.png"
+plot_metric(
+    df, avg_suffix="mem_avg", std_suffix="mem_std",
+    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+    save_path=MEM_PLOT_FILE,
+)
