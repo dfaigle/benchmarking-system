@@ -7,8 +7,13 @@ import matplotlib.ticker as ticker
 import gc
 import time
 import tracemalloc
+import sys
 from pathlib import Path
 from datetime import datetime
+
+# Windows-Konsole auf UTF-8 stellen (sonst UnicodeEncodeError bei → und Umlauten)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 # =========================================================
 # ➤  GATE-SET AUSWAHL  ←  hier anpassen
@@ -21,7 +26,7 @@ from datetime import datetime
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-GATE_SET_CHOICE = "non_clifford"
+GATE_SET_CHOICE = "clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -39,7 +44,7 @@ GATE_SET_CHOICE = "non_clifford"
 #                  Tape:         qml.gradients.param_shift(tape) + execute
 #                  QNode:        qml.grad(circuit)(params)
 #
-BENCHMARK_MODE = "gradient"
+BENCHMARK_MODE = "execution"
 
 # =========================================================
 # Gate-Definitionen
@@ -85,16 +90,16 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration
 # =========================================================
 
-RESULT_DIR = Path("../results/Qiskit")
-RESULT_DIR.mkdir(exist_ok=True)
+RESULT_DIR = Path(__file__).parent.parent / "Results" / "Pennylane"
+RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5, 10, 15]
+QUBIT_CONFIGS = [5]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(1000), 20)).astype(int)
 )
 # [    10     16     26     43     70    113    183    298    483
 #      785   1274   2069   3360   5456   8859  14384  23357  37927
@@ -422,6 +427,7 @@ def measure_memory(func, repeats: int = 5) -> dict:
 # =========================================================
 
 results = []
+first_write = True   # Header nur beim allerersten Schreiben
 
 for num_qubits in QUBIT_CONFIGS:
     for total_gates in GATE_CONFIGS:
@@ -450,7 +456,7 @@ for num_qubits in QUBIT_CONFIGS:
             f"qnode_c={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB"
         )
 
-        results.append({
+        row = {
             "timestamp":      datetime.now().isoformat(),
             "gate_set":       GATE_SET_CHOICE,
             "benchmark_mode": BENCHMARK_MODE,
@@ -462,15 +468,19 @@ for num_qubits in QUBIT_CONFIGS:
             **{f"tape_mem_{k}": v for k, v in tape_mem.items()},
             **{f"qnc_mem_{k}":  v for k, v in qnc_mem.items()},
             **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
-        })
+        }
+        results.append(row)
+
+        # Zwischenergebnis sofort anhängen → überlebt einen Absturz
+        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
+        first_write = False
 
 # =========================================================
 # CSV speichern
 # =========================================================
 
 df = pd.DataFrame(results)
-df.to_csv(CSV_FILE, index=False)
-print(f"\nErgebnisse gespeichert: {CSV_FILE}")
+print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
 
 # =========================================================
 # Plot  (3 Subplots: Tape | QNode no cache | QNode cached)

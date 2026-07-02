@@ -14,6 +14,7 @@ import matplotlib.ticker as ticker
 import gc
 import time
 import tracemalloc
+import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -21,6 +22,10 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.quantum_info import SparsePauliOp, Statevector
 from qiskit.primitives import StatevectorEstimator
 from qiskit.circuit import ParameterVector
+
+# Windows-Konsole auf UTF-8 stellen (sonst UnicodeEncodeError bei → und Umlauten)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 # =========================================================
 # ➤  GATE-SET AUSWAHL  ←  hier anpassen
@@ -425,6 +430,7 @@ def measure_memory(func, repeats: int = 5) -> dict:
 # =========================================================
 
 results = []
+first_write = True   # Header nur beim allerersten Schreiben
 
 for num_qubits in QUBIT_CONFIGS:
     for total_gates in GATE_CONFIGS:
@@ -451,7 +457,7 @@ for num_qubits in QUBIT_CONFIGS:
             f"estt={estt_stats['avg']:.5f}s/{estt_mem['avg']:.1f}MiB"
         )
 
-        results.append({
+        row = {
             "timestamp":      datetime.now().isoformat(),
             "gate_set":       GATE_SET_CHOICE,
             "benchmark_mode": BENCHMARK_MODE,
@@ -463,15 +469,19 @@ for num_qubits in QUBIT_CONFIGS:
             **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
             **{f"est_mem_{k}":  v for k, v in est_mem.items()},
             **{f"estt_mem_{k}": v for k, v in estt_mem.items()},
-        })
+        }
+        results.append(row)
+
+        # Zwischenergebnis sofort anhängen → überlebt einen Absturz
+        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
+        first_write = False
 
 # =========================================================
 # CSV speichern
 # =========================================================
 
 df = pd.DataFrame(results)
-df.to_csv(CSV_FILE, index=False)
-print(f"\nErgebnisse gespeichert: {CSV_FILE}")
+print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
 
 # =========================================================
 # Plot  (3 Subplots: QC + Statevector | Estimator | Estimator transpiliert)
