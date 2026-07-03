@@ -118,15 +118,17 @@ GATE_CONFIGS = np.unique(
 )
 
 # =========================================================
-# Versioned CSV
+# Pro Lauf ein eigener Unterordner: Results/Qiskit/run_<N>/
 # =========================================================
 
-version = 1
-while True:
-    CSV_FILE = RESULT_DIR / f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_V{version}.csv"
-    if not CSV_FILE.exists():
-        break
-    version += 1
+run = 1
+while (RESULT_DIR / f"run_{run}").exists():
+    run += 1
+RUN_DIR = RESULT_DIR / f"run_{run}"
+RUN_DIR.mkdir(parents=True)
+
+_stub    = f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}"
+CSV_FILE = RUN_DIR / f"{_stub}.csv"
 
 # =========================================================
 # Gate-Eigenschaften
@@ -547,7 +549,7 @@ def plot_metric(
 mode_label = MODE_LABELS[BENCHMARK_MODE]
 
 # --- Laufzeit ---
-PLOT_FILE = RESULT_DIR / f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_V{version}.png"
+PLOT_FILE = RUN_DIR / f"{_stub}_time.png"
 plot_metric(
     df, avg_suffix="avg", std_suffix="std",
     ylabel="Zeit (s)", title=mode_label,
@@ -555,7 +557,7 @@ plot_metric(
 )
 
 # --- Speicherverbrauch (Peak, tracemalloc) ---
-MEM_PLOT_FILE = RESULT_DIR / f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}_mem_V{version}.png"
+MEM_PLOT_FILE = RUN_DIR / f"{_stub}_mem.png"
 plot_metric(
     df, avg_suffix="mem_avg", std_suffix="mem_std",
     ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
