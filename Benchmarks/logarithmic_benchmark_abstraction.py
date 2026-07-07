@@ -38,8 +38,8 @@ import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
 
-from executor import Executor
-from executor.abstraction import (
+from qc_executor import Executor
+from qc_executor.abstraction import (
     AbstractQuantumCircuit,
     AbstractQuantumOperator,
     ParameterVector,
@@ -80,7 +80,7 @@ GATE_SET_CHOICE = "clifford"
 #  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
 #  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩ nach trainierbarer RY-Schicht).
 #
-BENCHMARK_MODE = "execution"
+BENCHMARK_MODE = "gradient"
 
 # Plots am Ende interaktiv anzeigen? Für Batch-/Headless-Läufe auf False setzen
 # (die PNGs werden unabhängig davon immer gespeichert).
