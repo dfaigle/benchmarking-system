@@ -44,7 +44,7 @@ GATE_SET_CHOICE = "clifford"
 #                  Tape:         qml.gradients.param_shift(tape) + execute
 #                  QNode:        qml.grad(circuit)(params)
 #
-BENCHMARK_MODE = "execution"
+BENCHMARK_MODE = "gradient"
 
 # =========================================================
 # Gate-Definitionen
@@ -292,11 +292,20 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 
 
 # ------ GRADIENT ------
-# Misst: reine Ausführungszeit der Gradienten-Berechnung via Parameter-Shift.
-# Tape und grad_tapes werden einmalig vorgebaut (analog zur QNode-Vorbereitung).
+# Misst: reine Ausführungszeit der Gradienten-Berechnung.
 #
 #   Trainierbare Schicht: RY(params[i]) pro Qubit, dann Gate-Block
 #   Ausgabe: Erwartungswert ⟨Z₀⟩
+#
+# QNode-Linien nutzen diff_method="best" (auf default.qubit → Backprop) —
+# identisch zum Executor der Abstraktionsschicht (pennylane_executor.py,
+# QNode mit diff_method="best"). Dadurch messen Roh-Benchmark und
+# Executor-Benchmark denselben Gradienten-Algorithmus, und die Differenz
+# Executor − Roh ist der reine Abstraktions-Overhead.
+#
+# ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
+# da Backprop nur über das QNode-Interface verfügbar ist — sie ist daher im
+# Gradient-Modus NICHT direkt mit den QNode-Linien vergleichbar.
 #
 #   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
 #   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
@@ -325,7 +334,7 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
 def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    @qml.qnode(dev, cache=False, diff_method="parameter-shift")
+    @qml.qnode(dev, cache=False, diff_method="best")
     def circuit(params):
         for i in range(num_qubits):
             qml.RY(params[i], wires=i)
@@ -345,7 +354,7 @@ def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
 def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    @qml.qnode(dev, cache=True, diff_method="parameter-shift")
+    @qml.qnode(dev, cache=True, diff_method="best")
     def circuit(params):
         for i in range(num_qubits):
             qml.RY(params[i], wires=i)
