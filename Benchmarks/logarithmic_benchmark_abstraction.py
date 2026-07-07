@@ -69,7 +69,7 @@ BACKEND_CHOICE = "pennylane"
 # Namen und Gatter decken sich mit den gleichnamigen Sets des Roh-Benchmarks
 # (nur die von der Abstraktion unterstützten — Rot/Toffoli fehlen dort).
 #
-GATE_SET_CHOICE = "clifford"
+GATE_SET_CHOICE = "non_clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -127,10 +127,10 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5]
+QUBIT_CONFIGS = [5,10,15]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(1000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
 
 #: Präfixe der zwei Linien — identisch zum Roh-Benchmark, damit die CSVs

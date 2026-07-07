@@ -26,7 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-GATE_SET_CHOICE = "clifford"
+GATE_SET_CHOICE = "non_clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -96,10 +96,10 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5]
+QUBIT_CONFIGS = [5,10,15]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(1000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
 # [    10     16     26     43     70    113    183    298    483
 #      785   1274   2069   3360   5456   8859  14384  23357  37927
