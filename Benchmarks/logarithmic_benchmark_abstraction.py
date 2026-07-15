@@ -69,7 +69,7 @@ BACKEND_CHOICE = "pennylane"
 # Namen und Gatter decken sich mit den gleichnamigen Sets des Roh-Benchmarks
 # (nur die von der Abstraktion unterstützten — Rot/Toffoli fehlen dort).
 #
-GATE_SET_CHOICE = "non_clifford"
+GATE_SET_CHOICE = "single_qubit_plus_cnot"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -127,7 +127,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5,10,15]
+QUBIT_CONFIGS = [5, 8, 10, 12, 15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -269,13 +269,33 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
         qc_abs = build_abstract_trainable(num_qubits, sequence, theta)
         op = ex.transpile_operator(obs)
 
-        def r_qnc():
-            ex.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
+        # Stufen-Zerlegung: der Executor kapselt die Ableitung in EINEM Aufruf
+        # (expectation_value_derivatives) und bietet keine internen Stufen-Hooks.
+        # Daher werden Bauen (transpile_circuit: abstrakt → nativ) und Ausführen
+        # (eine einzelne statevector-Auswertung) als Proxys isoliert gemessen;
+        # der Gradient-Rest = total − build − exec. Bei negativem Rest (Ergebnis-
+        # Cache) werden build/exec so reskaliert, dass die Summe der gemessenen
+        # Gesamtzeit entspricht (grad = 0). "total" bleibt der unveränderte Modus.
+        def make_staged(executor):
+            def staged() -> dict:
+                t0 = time.perf_counter(); executor.transpile_circuit(qc_abs);            tb = time.perf_counter() - t0
+                t0 = time.perf_counter(); executor.statevector(qc_abs, **{"x": values}); te = time.perf_counter() - t0
+                t0 = time.perf_counter()
+                executor.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
+                tt = time.perf_counter() - t0
+                tb, te, tg = _split_total(tt, tb, te)
+                return {"build": tb, "exec": te, "grad": tg, "total": tt}
+            return staged
 
-        def r_qc():
-            ex_cached.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
+        def make_total(executor):
+            def total():
+                executor.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
+            return total
 
-        return {"qnc": r_qnc, "qc": r_qc}
+        return {
+            "qnc": {"staged": make_staged(ex),        "total": make_total(ex)},
+            "qc":  {"staged": make_staged(ex_cached), "total": make_total(ex_cached)},
+        }
 
     raise ValueError(f"Unbekannter Modus '{mode}'.")
 
@@ -304,6 +324,38 @@ def measure_runtime(func, repeats: int = 5) -> dict:
         "min": float(np.min(times)),
         "max": float(np.max(times)),
     }
+
+
+def _stats(vals: list) -> dict:
+    return {
+        "avg": float(np.mean(vals)),
+        "std": float(np.std(vals)),
+        "min": float(np.min(vals)),
+        "max": float(np.max(vals)),
+    }
+
+
+def _split_total(tt: float, tb: float, te: float) -> tuple:
+    """Additive Aufteilung: build + exec + grad == tt (immer, ohne Überlauf)."""
+    s = tb + te
+    if s > tt and s > 0.0:
+        scale = tt / s
+        return tb * scale, te * scale, 0.0
+    return tb, te, tt - tb - te
+
+
+def measure_runtime_staged(staged_func, repeats: int = 5) -> dict:
+    """Wie measure_runtime, aber staged_func() liefert je Aufruf ein dict
+    {"build","exec","grad","total"}. Gibt pro Stufe (inkl. "total")
+    Statistiken zurück: {stufe: {"avg","std","min","max"}}."""
+    staged_func()   # Warm-up
+    acc = {"build": [], "exec": [], "grad": [], "total": []}
+    for _ in range(repeats):
+        gc.collect()
+        d = staged_func()
+        for k in acc:
+            acc[k].append(d[k])
+    return {k: _stats(v) for k, v in acc.items()}
 
 # =========================================================
 # Speicher-Messung (Peak via tracemalloc)
@@ -344,13 +396,6 @@ for num_qubits in QUBIT_CONFIGS:
 
         runners = build_runners(BENCHMARK_MODE, num_qubits, sequence)
 
-        stats = {m: measure_runtime(runners[m], REPEATS) for m in METHODS}
-        mem   = {m: measure_memory(runners[m], REPEATS) for m in METHODS}
-
-        print(
-            f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
-        )
-
         row = {
             "timestamp":      datetime.now().isoformat(),
             "backend":        BACKEND_CHOICE,
@@ -359,9 +404,36 @@ for num_qubits in QUBIT_CONFIGS:
             "num_qubits":     num_qubits,
             "total_gates":    total_gates,
         }
-        for m in METHODS:
-            row.update({f"{m}_{k}": v for k, v in stats[m].items()})
-            row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
+
+        if BENCHMARK_MODE == "gradient":
+            # Gradient-Runner liefern {"staged","total"}: Stufen-Timing (build/
+            # exec/grad, summiert = Gesamt) + Gesamt-Speicher (unveränderter Modus).
+            stage_stats = {m: measure_runtime_staged(runners[m]["staged"], REPEATS) for m in METHODS}
+            mem         = {m: measure_memory(runners[m]["total"], REPEATS)          for m in METHODS}
+
+            print(
+                f"  qnc={stage_stats['qnc']['total']['avg']:.5f}s  "
+                f"qc={stage_stats['qc']['total']['avg']:.5f}s"
+            )
+            for m in METHODS:
+                # Gesamtzeit (Spalten wie bisher → bestehende Zeit-Plots bleiben gültig)
+                row.update({f"{m}_{k}": v for k, v in stage_stats[m]["total"].items()})
+                # Stufen-Zeiten
+                for stage in ("build", "exec", "grad"):
+                    row.update({f"{m}_{stage}_{k}": v for k, v in stage_stats[m][stage].items()})
+                # Speicher (Gesamt, unverändert)
+                row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
+        else:
+            stats = {m: measure_runtime(runners[m], REPEATS) for m in METHODS}
+            mem   = {m: measure_memory(runners[m], REPEATS) for m in METHODS}
+
+            print(
+                f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
+            )
+            for m in METHODS:
+                row.update({f"{m}_{k}": v for k, v in stats[m].items()})
+                row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
+
         results.append(row)
 
         # Zwischenergebnis sofort anhängen — überlebt einen Absturz
@@ -439,6 +511,64 @@ def plot_metric(
     plt.close(fig)
 
 
+def plot_gradient_stages(df: pd.DataFrame, save_path: Path | None = None) -> None:
+    """Gestapelte Stufen-Zerlegung (Bauen + Ausführen + Gradient) der
+    Gradientenzeit. Raster: Zeilen = Executor-Linien, Spalten = Qubit-Zahl.
+    Die gestapelte Höhe entspricht der gemessenen Gesamt-Gradientenzeit
+    (y linear, damit sich die Stufen additiv aufsummieren). Bauen/Ausführen
+    sind Proxys (transpile_circuit / eine statevector-Auswertung), der
+    Gradient-Rest = total − build − exec (siehe build_runners)."""
+    qubit_vals = sorted(df["num_qubits"].unique())
+    gate_set   = df["gate_set"].iloc[0]
+
+    methods = [("Executor (no cache)", "qnc"),
+               ("Executor (cached)",   "qc")]
+    stages  = [("Bauen",     "build", "tab:blue"),
+               ("Ausführen", "exec",  "tab:orange"),
+               ("Gradient",  "grad",  "tab:green")]
+
+    nrows, ncols = len(methods), len(qubit_vals)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+
+    fig.suptitle(
+        f"Gradient – Stufen-Zerlegung (gestapelt)  |  Backend: {BACKEND_CHOICE!r}  "
+        f"|  Gate-Set: {gate_set!r}",
+        fontsize=14, fontweight="bold", y=1.005,
+    )
+
+    for r, (m_label, m_key) in enumerate(methods):
+        for c, nq in enumerate(qubit_vals):
+            ax  = axes[r][c]
+            sub = df[df["num_qubits"] == nq].sort_values("total_gates")
+            x   = sub["total_gates"].values
+            ys  = [np.maximum(sub[f"{m_key}_{s_key}_avg"].values, 0.0)
+                   for _, s_key, _ in stages]
+
+            ax.stackplot(x, *ys,
+                         labels=[s[0] for s in stages],
+                         colors=[s[2] for s in stages], alpha=0.85)
+
+            ax.set_xscale("log")
+            ax.set_xlabel("Anzahl Gatter", fontsize=10)
+            ax.set_ylabel("Zeit (s)", fontsize=10)
+            ax.set_title(f"{m_label} – {nq} Qubits", fontsize=11, fontweight="bold")
+            if r == 0 and c == 0:
+                ax.legend(fontsize=8, loc="upper left")
+            ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
+            ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
+            ax.xaxis.set_minor_formatter(ticker.NullFormatter())
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Plot gespeichert: {save_path}")
+
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
 mode_label = MODE_LABELS[BENCHMARK_MODE]
 
 # --- Laufzeit ---
@@ -454,3 +584,7 @@ plot_metric(
     ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
     save_path=RUN_DIR / f"{_stub}_mem.png",
 )
+
+# --- Gradient: gestapelte Stufen-Zerlegung (build / exec / grad) ---
+if BENCHMARK_MODE == "gradient":
+    plot_gradient_stages(df, save_path=RUN_DIR / f"{_stub}_stages.png")
