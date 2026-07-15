@@ -34,7 +34,7 @@ GATE_SET_CHOICE = "non_clifford"
 #
 #  "creation"  → Zeit um den Circuit aufzubauen (kein Ausführen)
 #                  Tape:         QuantumTape befüllen
-#                  QNode:        Erster Aufruf  (Python-Tracing + Graph-Aufbau)
+#                  QNode:        construct_tape  (Tracing + Tape-Aufbau, kein Execute)
 #
 #  "execution" → Zeit der reinen Simulation nach dem Aufbau
 #                  Tape:         qml.execute([tape], dev)
@@ -44,7 +44,10 @@ GATE_SET_CHOICE = "non_clifford"
 #                  Tape:         qml.gradients.param_shift(tape) + execute
 #                  QNode:        qml.grad(circuit)(params)
 #
-BENCHMARK_MODE = "gradient"
+#  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
+#                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
+#
+BENCHMARK_MODE = "all"
 
 # =========================================================
 # Gate-Definitionen
@@ -78,7 +81,7 @@ def resolve_gate_set(choice: str) -> list:
         raise ValueError(f"Unbekanntes Gate-Set '{choice}'. Gültig: {valid}")
     return mapping[choice]
 
-VALID_MODES = {"creation", "execution", "gradient"}
+VALID_MODES = {"creation", "execution", "gradient", "all"}
 if BENCHMARK_MODE not in VALID_MODES:
     raise ValueError(f"Unbekannter Modus '{BENCHMARK_MODE}'. Gültig: {VALID_MODES}")
 
@@ -117,8 +120,7 @@ while (RESULT_DIR / f"run_{run}").exists():
 RUN_DIR = RESULT_DIR / f"run_{run}"
 RUN_DIR.mkdir(parents=True)
 
-_stub    = f"benchmark_{GATE_SET_CHOICE}_{BENCHMARK_MODE}"
-CSV_FILE = RUN_DIR / f"{_stub}.csv"
+# CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
 # =========================================================
 # Gate-Eigenschaften
@@ -199,11 +201,14 @@ def apply_gate(gate_name: str, wires: list, params: list) -> None:
 
 # ------ CREATION ------
 # Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
-# Device-Erstellung ist für alle drei ausgelagert (gleiche Baseline).
+# Device-Erstellung ist ausgelagert (gleiche Baseline).
 #
-#   Tape:           QuantumTape-Kontext befüllen (kein execute)
-#   QNode no cache: QNode-Funktion definieren + ersten Aufruf (Tracing)
-#   QNode cached:   QNode-Funktion definieren + ersten Aufruf (Tracing + Caching)
+#   Tape:   QuantumTape-Kontext befüllen (kein execute)
+#   QNode:  qml.workflow.construct_tape → Tracing + Tape-Aufbau (kein execute)
+#
+# cache=True/False ist hier irrelevant: der Cache betrifft nur
+# Ausführungsergebnisse (keyed auf Tape-Hash), nicht das Tracing —
+# daher genügt im Creation-Modus eine einzige QNode-Linie.
 
 def runner_creation_tape(num_qubits: int, gate_sequence: list):
     def run():
@@ -215,32 +220,17 @@ def runner_creation_tape(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_creation_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_creation_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    def run():
-        @qml.qnode(dev, cache=False)
-        def circuit():
-            for gn, ws, ps in gate_sequence:
-                apply_gate(gn, ws, ps)
-            return qml.probs(wires=range(num_qubits))
-
-        circuit()   # erster Aufruf = Tracing
-
-    return run
-
-
-def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    @qml.qnode(dev)
+    def circuit():
+        for gn, ws, ps in gate_sequence:
+            apply_gate(gn, ws, ps)
+        return qml.probs(wires=range(num_qubits))
 
     def run():
-        @qml.qnode(dev, cache=True)
-        def circuit():
-            for gn, ws, ps in gate_sequence:
-                apply_gate(gn, ws, ps)
-            return qml.probs(wires=range(num_qubits))
-
-        circuit()   # erster Aufruf = Tracing + Caching
+        qml.workflow.construct_tape(circuit)()   # nur Tracing + Tape-Aufbau
 
     return run
 
@@ -372,13 +362,26 @@ def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
 
 
 # =========================================================
-# Modus → Runner-Tripel auflösen
+# Modus → Runner-Liste auflösen
 # =========================================================
+# Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
+# Creation hat nur zwei Linien (nc/c dort bedeutungslos, s.o.).
 
 MODE_RUNNERS = {
-    "creation":  (runner_creation_tape,  runner_creation_qnode_nc,  runner_creation_qnode_c),
-    "execution": (runner_execution_tape, runner_execution_qnode_nc, runner_execution_qnode_c),
-    "gradient":  (runner_gradient_tape,  runner_gradient_qnode_nc,  runner_gradient_qnode_c),
+    "creation": [
+        ("tape",  "Tape",  "tab:blue",   runner_creation_tape),
+        ("qnode", "QNode", "tab:orange", runner_creation_qnode),
+    ],
+    "execution": [
+        ("tape", "Tape",             "tab:blue",   runner_execution_tape),
+        ("qnc",  "QNode (no cache)", "tab:orange", runner_execution_qnode_nc),
+        ("qc",   "QNode (cached)",   "tab:green",  runner_execution_qnode_c),
+    ],
+    "gradient": [
+        ("tape", "Tape",             "tab:blue",   runner_gradient_tape),
+        ("qnc",  "QNode (no cache)", "tab:orange", runner_gradient_qnode_nc),
+        ("qc",   "QNode (cached)",   "tab:green",  runner_gradient_qnode_c),
+    ],
 }
 
 MODE_LABELS = {
@@ -387,7 +390,8 @@ MODE_LABELS = {
     "gradient":  "Gradienten-Berechnungszeit",
 }
 
-build_tape, build_qnc, build_qc = MODE_RUNNERS[BENCHMARK_MODE]
+# "all" → alle Modi in Definitionsreihenfolge, sonst nur der gewählte
+MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MODE]
 
 # =========================================================
 # Timing
@@ -434,71 +438,59 @@ def measure_memory(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
-# Benchmark-Schleife
+# Benchmark-Schleife (ein Modus)
 # =========================================================
 
-results = []
-first_write = True   # Header nur beim allerersten Schreiben
+def run_benchmark(mode: str) -> pd.DataFrame:
+    runners  = MODE_RUNNERS[mode]
+    csv_file = RUN_DIR / f"benchmark_{GATE_SET_CHOICE}_{mode}.csv"
 
-for num_qubits in QUBIT_CONFIGS:
-    for total_gates in GATE_CONFIGS:
+    results = []
+    first_write = True   # Header nur beim allerersten Schreiben
 
-        print(f"Qubits={num_qubits}  Gates={total_gates}")
+    for num_qubits in QUBIT_CONFIGS:
+        for total_gates in GATE_CONFIGS:
 
-        gate_sequence = generate_gate_sequence(
-            num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
-        )
+            print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-        tape_runner = build_tape(num_qubits, gate_sequence)
-        qnc_runner  = build_qnc(num_qubits,  gate_sequence)
-        qc_runner   = build_qc(num_qubits,   gate_sequence)
+            gate_sequence = generate_gate_sequence(
+                num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
+            )
 
-        tape_stats = measure_runtime(tape_runner, REPEATS)
-        qnc_stats  = measure_runtime(qnc_runner,  REPEATS)
-        qc_stats   = measure_runtime(qc_runner,   REPEATS)
+            row = {
+                "timestamp":      datetime.now().isoformat(),
+                "gate_set":       GATE_SET_CHOICE,
+                "benchmark_mode": mode,
+                "num_qubits":     num_qubits,
+                "total_gates":    total_gates,
+            }
 
-        tape_mem = measure_memory(tape_runner, REPEATS)
-        qnc_mem  = measure_memory(qnc_runner,  REPEATS)
-        qc_mem   = measure_memory(qc_runner,   REPEATS)
+            log_parts = []
+            for prefix, _label, _color, builder in runners:
+                runner = builder(num_qubits, gate_sequence)
+                stats  = measure_runtime(runner, REPEATS)
+                mem    = measure_memory(runner, REPEATS)
+                row.update({f"{prefix}_{k}":     v for k, v in stats.items()})
+                row.update({f"{prefix}_mem_{k}": v for k, v in mem.items()})
+                log_parts.append(f"{prefix}={stats['avg']:.5f}s/{mem['avg']:.1f}MiB")
 
-        print(
-            f"  tape={tape_stats['avg']:.5f}s/{tape_mem['avg']:.1f}MiB  "
-            f"qnode_nc={qnc_stats['avg']:.5f}s/{qnc_mem['avg']:.1f}MiB  "
-            f"qnode_c={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB"
-        )
+            print("  " + "  ".join(log_parts))
+            results.append(row)
 
-        row = {
-            "timestamp":      datetime.now().isoformat(),
-            "gate_set":       GATE_SET_CHOICE,
-            "benchmark_mode": BENCHMARK_MODE,
-            "num_qubits":     num_qubits,
-            "total_gates":    total_gates,
-            **{f"tape_{k}":     v for k, v in tape_stats.items()},
-            **{f"qnc_{k}":      v for k, v in qnc_stats.items()},
-            **{f"qc_{k}":       v for k, v in qc_stats.items()},
-            **{f"tape_mem_{k}": v for k, v in tape_mem.items()},
-            **{f"qnc_mem_{k}":  v for k, v in qnc_mem.items()},
-            **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
-        }
-        results.append(row)
+            # Zwischenergebnis sofort anhängen → überlebt einen Absturz
+            pd.DataFrame([row]).to_csv(csv_file, mode="a", header=first_write, index=False)
+            first_write = False
 
-        # Zwischenergebnis sofort anhängen → überlebt einen Absturz
-        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
-        first_write = False
+    print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {csv_file}")
+    return pd.DataFrame(results)
 
 # =========================================================
-# CSV speichern
-# =========================================================
-
-df = pd.DataFrame(results)
-print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
-
-# =========================================================
-# Plot  (3 Subplots: Tape | QNode no cache | QNode cached)
+# Plot  (ein Subplot pro Qubit-Zahl, eine Linie pro Abstraktion)
 # =========================================================
 
 def plot_metric(
     df: pd.DataFrame,
+    runners: list,
     avg_suffix: str,
     std_suffix: str,
     ylabel: str,
@@ -509,9 +501,8 @@ def plot_metric(
     gate_set   = df["gate_set"].iloc[0]
 
     method_cfg = [
-        ("Tape",              f"tape_{avg_suffix}", f"tape_{std_suffix}", "tab:blue"),
-        ("QNode (no cache)",  f"qnc_{avg_suffix}",  f"qnc_{std_suffix}",  "tab:orange"),
-        ("QNode (cached)",    f"qc_{avg_suffix}",   f"qc_{std_suffix}",   "tab:green"),
+        (label, f"{prefix}_{avg_suffix}", f"{prefix}_{std_suffix}", color)
+        for prefix, label, color, _builder in runners
     ]
 
     n_qubits = len(qubit_vals)
@@ -552,23 +543,33 @@ def plot_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Plot gespeichert: {save_path}")
 
-    plt.show()
 
+# =========================================================
+# Haupt-Ablauf: gewählte Modi nacheinander ausführen
+# =========================================================
+# CSV + Plots werden direkt nach jedem Modus gespeichert (absturzsicher),
+# angezeigt werden alle Plot-Fenster gesammelt am Ende.
 
-mode_label = MODE_LABELS[BENCHMARK_MODE]
+for mode in MODES_TO_RUN:
+    print(f"\n========== Modus: {mode!r} ==========\n")
 
-# --- Laufzeit ---
-PLOT_FILE = RUN_DIR / f"{_stub}_time.png"
-plot_metric(
-    df, avg_suffix="avg", std_suffix="std",
-    ylabel="Zeit (s)", title=mode_label,
-    save_path=PLOT_FILE,
-)
+    df         = run_benchmark(mode)
+    runners    = MODE_RUNNERS[mode]
+    mode_label = MODE_LABELS[mode]
+    stub       = f"benchmark_{GATE_SET_CHOICE}_{mode}"
 
-# --- Speicherverbrauch (Peak, tracemalloc) ---
-MEM_PLOT_FILE = RUN_DIR / f"{_stub}_mem.png"
-plot_metric(
-    df, avg_suffix="mem_avg", std_suffix="mem_std",
-    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
-    save_path=MEM_PLOT_FILE,
-)
+    # --- Laufzeit ---
+    plot_metric(
+        df, runners, avg_suffix="avg", std_suffix="std",
+        ylabel="Zeit (s)", title=mode_label,
+        save_path=RUN_DIR / f"{stub}_time.png",
+    )
+
+    # --- Speicherverbrauch (Peak, tracemalloc) ---
+    plot_metric(
+        df, runners, avg_suffix="mem_avg", std_suffix="mem_std",
+        ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+        save_path=RUN_DIR / f"{stub}_mem.png",
+    )
+
+plt.show()
