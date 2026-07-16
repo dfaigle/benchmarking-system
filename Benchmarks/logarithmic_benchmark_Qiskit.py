@@ -61,7 +61,10 @@ GATE_SET_CHOICE = "non_clifford"
 #                  est:  StatevectorEstimator + manueller Param-Shift
 #                  estt: StatevectorEstimator + Param-Shift (vorkompiliert)
 #
-BENCHMARK_MODE = "gradient"
+#  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
+#                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
+#
+BENCHMARK_MODE = "all"
 
 # =========================================================
 # Gate-Definitionen 
@@ -93,7 +96,7 @@ def resolve_gate_set(choice: str) -> list:
     return mapping[choice]
 
 
-VALID_MODES = {"creation", "execution", "gradient"}
+VALID_MODES = {"creation", "execution", "gradient", "all"}
 if BENCHMARK_MODE not in VALID_MODES:
     raise ValueError(f"Unbekannter Modus '{BENCHMARK_MODE}'. Gültig: {VALID_MODES}")
 
@@ -127,8 +130,7 @@ while (RESULT_DIR / f"run_{run}").exists():
 RUN_DIR = RESULT_DIR / f"run_{run}"
 RUN_DIR.mkdir(parents=True)
 
-_stub    = f"qiskit_{GATE_SET_CHOICE}_{BENCHMARK_MODE}"
-CSV_FILE = RUN_DIR / f"{_stub}.csv"
+# CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
 # =========================================================
 # Gate-Eigenschaften
@@ -366,13 +368,26 @@ def runner_gradient_estt(num_qubits: int, gate_sequence: list):
     return run
 
 # =========================================================
-# Modus → Runner-Tripel auflösen
+# Modus → Runner-Liste auflösen
 # =========================================================
+# Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
 
 MODE_RUNNERS = {
-    "creation":  (runner_creation_qc,  runner_creation_est,  runner_creation_estt),
-    "execution": (runner_execution_qc, runner_execution_est, runner_execution_estt),
-    "gradient":  (runner_gradient_qc,  runner_gradient_est,  runner_gradient_estt),
+    "creation": [
+        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_creation_qc),
+        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_creation_est),
+        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_creation_estt),
+    ],
+    "execution": [
+        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_execution_qc),
+        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_execution_est),
+        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_execution_estt),
+    ],
+    "gradient": [
+        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_gradient_qc),
+        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_gradient_est),
+        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_gradient_estt),
+    ],
 }
 
 MODE_LABELS = {
@@ -381,7 +396,8 @@ MODE_LABELS = {
     "gradient":  "Gradienten-Berechnungszeit",
 }
 
-build_qc, build_est, build_estt = MODE_RUNNERS[BENCHMARK_MODE]
+# "all" → alle Modi in Definitionsreihenfolge, sonst nur der gewählte
+MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MODE]
 
 # =========================================================
 # Timing
@@ -428,69 +444,57 @@ def measure_memory(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
-# Benchmark-Schleife
+# Benchmark-Schleife (ein Modus)
 # =========================================================
 
-results = []
-first_write = True   # Header nur beim allerersten Schreiben
+def run_benchmark(mode: str) -> pd.DataFrame:
+    runners  = MODE_RUNNERS[mode]
+    csv_file = RUN_DIR / f"qiskit_{GATE_SET_CHOICE}_{mode}.csv"
 
-for num_qubits in QUBIT_CONFIGS:
-    for total_gates in GATE_CONFIGS:
+    results = []
+    first_write = True   # Header nur beim allerersten Schreiben
 
-        print(f"Qubits={num_qubits}  Gates={total_gates}")
+    for num_qubits in QUBIT_CONFIGS:
+        for total_gates in GATE_CONFIGS:
 
-        gate_sequence = generate_gate_sequence(num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED)
+            print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-        qc_runner   = build_qc(num_qubits,   gate_sequence)
-        est_runner  = build_est(num_qubits,  gate_sequence)
-        estt_runner = build_estt(num_qubits, gate_sequence)
+            gate_sequence = generate_gate_sequence(num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED)
 
-        qc_stats   = measure_runtime(qc_runner,   REPEATS)
-        est_stats  = measure_runtime(est_runner,  REPEATS)
-        estt_stats = measure_runtime(estt_runner, REPEATS)
+            row = {
+                "timestamp":      datetime.now().isoformat(),
+                "gate_set":       GATE_SET_CHOICE,
+                "benchmark_mode": mode,
+                "num_qubits":     num_qubits,
+                "total_gates":    total_gates,
+            }
 
-        qc_mem   = measure_memory(qc_runner,   REPEATS)
-        est_mem  = measure_memory(est_runner,  REPEATS)
-        estt_mem = measure_memory(estt_runner, REPEATS)
+            log_parts = []
+            for prefix, _label, _color, builder in runners:
+                runner = builder(num_qubits, gate_sequence)
+                stats  = measure_runtime(runner, REPEATS)
+                mem    = measure_memory(runner, REPEATS)
+                row.update({f"{prefix}_{k}":     v for k, v in stats.items()})
+                row.update({f"{prefix}_mem_{k}": v for k, v in mem.items()})
+                log_parts.append(f"{prefix}={stats['avg']:.5f}s/{mem['avg']:.1f}MiB")
 
-        print(
-            f"  qc={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB  "
-            f"est={est_stats['avg']:.5f}s/{est_mem['avg']:.1f}MiB  "
-            f"estt={estt_stats['avg']:.5f}s/{estt_mem['avg']:.1f}MiB"
-        )
+            print("  " + "  ".join(log_parts))
+            results.append(row)
 
-        row = {
-            "timestamp":      datetime.now().isoformat(),
-            "gate_set":       GATE_SET_CHOICE,
-            "benchmark_mode": BENCHMARK_MODE,
-            "num_qubits":     num_qubits,
-            "total_gates":    total_gates,
-            **{f"qc_{k}":       v for k, v in qc_stats.items()},
-            **{f"est_{k}":      v for k, v in est_stats.items()},
-            **{f"estt_{k}":     v for k, v in estt_stats.items()},
-            **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
-            **{f"est_mem_{k}":  v for k, v in est_mem.items()},
-            **{f"estt_mem_{k}": v for k, v in estt_mem.items()},
-        }
-        results.append(row)
+            # Zwischenergebnis sofort anhängen → überlebt einen Absturz
+            pd.DataFrame([row]).to_csv(csv_file, mode="a", header=first_write, index=False)
+            first_write = False
 
-        # Zwischenergebnis sofort anhängen → überlebt einen Absturz
-        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
-        first_write = False
+    print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {csv_file}")
+    return pd.DataFrame(results)
 
 # =========================================================
-# CSV speichern
-# =========================================================
-
-df = pd.DataFrame(results)
-print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
-
-# =========================================================
-# Plot  (3 Subplots: QC + Statevector | Estimator | Estimator transpiliert)
+# Plot  (ein Subplot pro Qubit-Zahl, eine Linie pro Abstraktion)
 # =========================================================
 
 def plot_metric(
     df: pd.DataFrame,
+    runners: list,
     avg_suffix: str,
     std_suffix: str,
     ylabel: str,
@@ -501,9 +505,8 @@ def plot_metric(
     gate_set   = df["gate_set"].iloc[0]
 
     method_cfg = [
-        ("QuantumCircuit + Statevector", f"qc_{avg_suffix}",   f"qc_{std_suffix}",   "tab:blue"),
-        ("Estimator (kein Transpile)",   f"est_{avg_suffix}",  f"est_{std_suffix}",  "tab:orange"),
-        ("Estimator (transpiliert)",     f"estt_{avg_suffix}", f"estt_{std_suffix}", "tab:green"),
+        (label, f"{prefix}_{avg_suffix}", f"{prefix}_{std_suffix}", color)
+        for prefix, label, color, _builder in runners
     ]
 
     n_qubits = len(qubit_vals)
@@ -543,23 +546,33 @@ def plot_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Plot gespeichert: {save_path}")
 
-    plt.show()
 
+# =========================================================
+# Haupt-Ablauf: gewählte Modi nacheinander ausführen
+# =========================================================
+# CSV + Plots werden direkt nach jedem Modus gespeichert (absturzsicher),
+# angezeigt werden alle Plot-Fenster gesammelt am Ende.
 
-mode_label = MODE_LABELS[BENCHMARK_MODE]
+for mode in MODES_TO_RUN:
+    print(f"\n========== Modus: {mode!r} ==========\n")
 
-# --- Laufzeit ---
-PLOT_FILE = RUN_DIR / f"{_stub}_time.png"
-plot_metric(
-    df, avg_suffix="avg", std_suffix="std",
-    ylabel="Zeit (s)", title=mode_label,
-    save_path=PLOT_FILE,
-)
+    df         = run_benchmark(mode)
+    runners    = MODE_RUNNERS[mode]
+    mode_label = MODE_LABELS[mode]
+    stub       = f"qiskit_{GATE_SET_CHOICE}_{mode}"
 
-# --- Speicherverbrauch (Peak, tracemalloc) ---
-MEM_PLOT_FILE = RUN_DIR / f"{_stub}_mem.png"
-plot_metric(
-    df, avg_suffix="mem_avg", std_suffix="mem_std",
-    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
-    save_path=MEM_PLOT_FILE,
-)
+    # --- Laufzeit ---
+    plot_metric(
+        df, runners, avg_suffix="avg", std_suffix="std",
+        ylabel="Zeit (s)", title=mode_label,
+        save_path=RUN_DIR / f"{stub}_time.png",
+    )
+
+    # --- Speicherverbrauch (Peak, tracemalloc) ---
+    plot_metric(
+        df, runners, avg_suffix="mem_avg", std_suffix="mem_std",
+        ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+        save_path=RUN_DIR / f"{stub}_mem.png",
+    )
+
+plt.show()

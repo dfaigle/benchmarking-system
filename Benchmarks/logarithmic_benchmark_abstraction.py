@@ -63,11 +63,13 @@ BACKEND_CHOICE = "pennylane"
 # =========================================================
 #
 #  "clifford"               → h, s, cx, x, y, z
+#  "non_clifford"           → t, rx, ry, rz, crx, cry, crz, cp
 #  "clifford_t"             → h, t, cx
 #  "single_qubit_plus_cnot" → rx, ry, rz, cx
 #
 # Namen und Gatter decken sich mit den gleichnamigen Sets des Roh-Benchmarks
-# (nur die von der Abstraktion unterstützten — Rot/Toffoli fehlen dort).
+# (nur die von der Abstraktion unterstützten — bei "non_clifford" fehlen daher
+# Rot/Toffoli; die Gatter-Sequenz ist dort also NICHT identisch zum Roh-Benchmark).
 #
 GATE_SET_CHOICE = "non_clifford"
 
@@ -79,8 +81,10 @@ GATE_SET_CHOICE = "non_clifford"
 #                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
 #  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
 #  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩ nach trainierbarer RY-Schicht).
+#  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
+#                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner.
 #
-BENCHMARK_MODE = "gradient"
+BENCHMARK_MODE = "all"
 
 # Plots am Ende interaktiv anzeigen? Für Batch-/Headless-Läufe auf False setzen
 # (die PNGs werden unabhängig davon immer gespeichert).
@@ -92,11 +96,12 @@ SHOW_PLOTS = True
 
 GATE_SETS = {
     "clifford":               ["h", "s", "cx", "x", "y", "z"],
+    "non_clifford":           ["t", "rx", "ry", "rz", "crx", "cry", "crz", "cp"],
     "clifford_t":             ["h", "t", "cx"],
     "single_qubit_plus_cnot": ["rx", "ry", "rz", "cx"],
 }
 
-VALID_MODES = {"creation", "execution", "gradient"}
+VALID_MODES = {"creation", "execution", "gradient", "all"}
 VALID_BACKENDS = {"pennylane", "qiskit"}
 
 
@@ -147,8 +152,7 @@ while (RESULT_DIR / f"run_{run}").exists():
 RUN_DIR = RESULT_DIR / f"run_{run}"
 RUN_DIR.mkdir(parents=True)
 
-_stub    = f"benchmark_executor_{BACKEND_CHOICE}_{GATE_SET_CHOICE}_{BENCHMARK_MODE}"
-CSV_FILE = RUN_DIR / f"{_stub}.csv"
+# CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
 # =========================================================
 # Gate-Eigenschaften  (kanonische Namen)
@@ -286,6 +290,11 @@ MODE_LABELS = {
     "gradient":  "Gradienten-Berechnungszeit",
 }
 
+# "all" → alle drei Modi nacheinander, sonst nur der gewählte
+MODES_TO_RUN = (
+    ["creation", "execution", "gradient"] if BENCHMARK_MODE == "all" else [BENCHMARK_MODE]
+)
+
 # =========================================================
 # Timing  (identisch zum Roh-Benchmark)
 # =========================================================
@@ -327,53 +336,52 @@ def measure_memory(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
-# Benchmark-Schleife
+# Benchmark-Schleife (ein Modus)
 # =========================================================
 
-results = []
-first_write = True   # Header nur beim allerersten Schreiben
+def run_benchmark(mode: str) -> pd.DataFrame:
+    csv_file = RUN_DIR / f"benchmark_executor_{BACKEND_CHOICE}_{GATE_SET_CHOICE}_{mode}.csv"
 
-for num_qubits in QUBIT_CONFIGS:
-    for total_gates in GATE_CONFIGS:
+    results = []
+    first_write = True   # Header nur beim allerersten Schreiben
 
-        print(f"Qubits={num_qubits}  Gates={total_gates}")
+    for num_qubits in QUBIT_CONFIGS:
+        for total_gates in GATE_CONFIGS:
 
-        sequence = generate_gate_sequence(
-            num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
-        )
+            print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-        runners = build_runners(BENCHMARK_MODE, num_qubits, sequence)
+            sequence = generate_gate_sequence(
+                num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
+            )
 
-        stats = {m: measure_runtime(runners[m], REPEATS) for m in METHODS}
-        mem   = {m: measure_memory(runners[m], REPEATS) for m in METHODS}
+            runners = build_runners(mode, num_qubits, sequence)
 
-        print(
-            f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
-        )
+            stats = {m: measure_runtime(runners[m], REPEATS) for m in METHODS}
+            mem   = {m: measure_memory(runners[m], REPEATS) for m in METHODS}
 
-        row = {
-            "timestamp":      datetime.now().isoformat(),
-            "backend":        BACKEND_CHOICE,
-            "gate_set":       GATE_SET_CHOICE,
-            "benchmark_mode": BENCHMARK_MODE,
-            "num_qubits":     num_qubits,
-            "total_gates":    total_gates,
-        }
-        for m in METHODS:
-            row.update({f"{m}_{k}": v for k, v in stats[m].items()})
-            row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
-        results.append(row)
+            print(
+                f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
+            )
 
-        # Zwischenergebnis sofort anhängen — überlebt einen Absturz
-        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
-        first_write = False
+            row = {
+                "timestamp":      datetime.now().isoformat(),
+                "backend":        BACKEND_CHOICE,
+                "gate_set":       GATE_SET_CHOICE,
+                "benchmark_mode": mode,
+                "num_qubits":     num_qubits,
+                "total_gates":    total_gates,
+            }
+            for m in METHODS:
+                row.update({f"{m}_{k}": v for k, v in stats[m].items()})
+                row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
+            results.append(row)
 
-# =========================================================
-# CSV speichern
-# =========================================================
+            # Zwischenergebnis sofort anhängen — überlebt einen Absturz
+            pd.DataFrame([row]).to_csv(csv_file, mode="a", header=first_write, index=False)
+            first_write = False
 
-df = pd.DataFrame(results)
-print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
+    print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {csv_file}")
+    return pd.DataFrame(results)
 
 # =========================================================
 # Plot  (2 Linien: caching=False vs caching=True; Layout wie Roh-Benchmark)
@@ -434,23 +442,38 @@ def plot_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Plot gespeichert: {save_path}")
 
-    if SHOW_PLOTS:
-        plt.show()
-    plt.close(fig)
+    # Anzeigen passiert gesammelt am Ende (plt.show() im Haupt-Ablauf);
+    # ohne Anzeige die Figur sofort schließen, um Speicher freizugeben.
+    if not SHOW_PLOTS:
+        plt.close(fig)
 
 
-mode_label = MODE_LABELS[BENCHMARK_MODE]
+# =========================================================
+# Haupt-Ablauf: gewählte Modi nacheinander ausführen
+# =========================================================
+# CSV + Plots werden direkt nach jedem Modus gespeichert (absturzsicher),
+# angezeigt werden alle Plot-Fenster gesammelt am Ende.
 
-# --- Laufzeit ---
-plot_metric(
-    df, avg_suffix="avg", std_suffix="std",
-    ylabel="Zeit (s)", title=mode_label,
-    save_path=RUN_DIR / f"{_stub}_time.png",
-)
+for mode in MODES_TO_RUN:
+    print(f"\n========== Modus: {mode!r} ==========\n")
 
-# --- Speicherverbrauch (Peak, tracemalloc) ---
-plot_metric(
-    df, avg_suffix="mem_avg", std_suffix="mem_std",
-    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
-    save_path=RUN_DIR / f"{_stub}_mem.png",
-)
+    df         = run_benchmark(mode)
+    mode_label = MODE_LABELS[mode]
+    stub       = f"benchmark_executor_{BACKEND_CHOICE}_{GATE_SET_CHOICE}_{mode}"
+
+    # --- Laufzeit ---
+    plot_metric(
+        df, avg_suffix="avg", std_suffix="std",
+        ylabel="Zeit (s)", title=mode_label,
+        save_path=RUN_DIR / f"{stub}_time.png",
+    )
+
+    # --- Speicherverbrauch (Peak, tracemalloc) ---
+    plot_metric(
+        df, avg_suffix="mem_avg", std_suffix="mem_std",
+        ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+        save_path=RUN_DIR / f"{stub}_mem.png",
+    )
+
+if SHOW_PLOTS:
+    plt.show()
