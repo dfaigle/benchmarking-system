@@ -22,11 +22,22 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "clifford"               → H, S, CNOT, PauliX/Y/Z
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
+#  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift  (ohne Rot/Toffoli —
+#                             1:1 vergleichbar mit "non_clifford" des
+#                             Executor-Benchmarks, s. Definition unten)
 #  "clifford_t"             → H, T, CNOT
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-GATE_SET_CHOICE = "single_qubit_plus_cnot"
+# ACHTUNG Vergleichbarkeit mit logarithmic_benchmark_abstraction.py:
+# rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
+# eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
+# Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
+# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable".
+# NICHT vergleichbar: "non_clifford" (10 statt 8 Gatter) und "rot_cnot".
+#
+GATE_SET_CHOICE = "non_clifford_comparable"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -34,7 +45,7 @@ GATE_SET_CHOICE = "single_qubit_plus_cnot"
 #
 #  "creation"  → Zeit um den Circuit aufzubauen (kein Ausführen)
 #                  Tape:         QuantumTape befüllen
-#                  QNode:        Erster Aufruf  (Python-Tracing + Graph-Aufbau)
+#                  QNode:        construct_tape  (Tracing + Tape-Aufbau, kein Execute)
 #
 #  "execution" → Zeit der reinen Simulation nach dem Aufbau
 #                  Tape:         qml.execute([tape], dev)
@@ -44,7 +55,10 @@ GATE_SET_CHOICE = "single_qubit_plus_cnot"
 #                  Tape:         qml.gradients.param_shift(tape) + execute
 #                  QNode:        qml.grad(circuit)(params)
 #
-BENCHMARK_MODE = "gradient"
+#  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
+#                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
+#
+BENCHMARK_MODE = "all"
 
 # =========================================================
 # Gate-Definitionen
@@ -55,6 +69,15 @@ CLIFFORD_GATES = ["Hadamard", "S", "CNOT", "PauliX", "PauliY", "PauliZ"]
 NON_CLIFFORD_GATES = [
     "T", "RX", "RY", "RZ", "Rot",
     "CRX", "CRY", "CRZ", "ControlledPhaseShift", "Toffoli",
+]
+
+# Spiegelt Position für Position das Set "non_clifford" des Executor-Benchmarks
+# (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
+# UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
+# Seed. Bei Änderungen beide Listen synchron halten!
+NON_CLIFFORD_COMPARABLE_GATES = [
+    "T", "RX", "RY", "RZ",
+    "CRX", "CRY", "CRZ", "ControlledPhaseShift",
 ]
 
 UNIVERSAL_GATE_SETS = {
@@ -69,8 +92,9 @@ UNIVERSAL_GATE_SETS = {
 
 def resolve_gate_set(choice: str) -> list:
     mapping = {
-        "clifford":     CLIFFORD_GATES,
-        "non_clifford": NON_CLIFFORD_GATES,
+        "clifford":                CLIFFORD_GATES,
+        "non_clifford":            NON_CLIFFORD_GATES,
+        "non_clifford_comparable": NON_CLIFFORD_COMPARABLE_GATES,
         **UNIVERSAL_GATE_SETS,
     }
     if choice not in mapping:
@@ -78,7 +102,7 @@ def resolve_gate_set(choice: str) -> list:
         raise ValueError(f"Unbekanntes Gate-Set '{choice}'. Gültig: {valid}")
     return mapping[choice]
 
-VALID_MODES = {"creation", "execution", "gradient"}
+VALID_MODES = {"creation", "execution", "gradient", "all"}
 if BENCHMARK_MODE not in VALID_MODES:
     raise ValueError(f"Unbekannter Modus '{BENCHMARK_MODE}'. Gültig: {VALID_MODES}")
 
@@ -96,7 +120,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5,8,10,12,15]
+QUBIT_CONFIGS = [5,10,15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -117,8 +141,7 @@ while (RESULT_DIR / f"run_{run}").exists():
 RUN_DIR = RESULT_DIR / f"run_{run}"
 RUN_DIR.mkdir(parents=True)
 
-_stub    = f"benchmark_{GATE_SET_CHOICE}_{BENCHMARK_MODE}"
-CSV_FILE = RUN_DIR / f"{_stub}.csv"
+# CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
 # =========================================================
 # Gate-Eigenschaften
@@ -199,11 +222,14 @@ def apply_gate(gate_name: str, wires: list, params: list) -> None:
 
 # ------ CREATION ------
 # Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
-# Device-Erstellung ist für alle drei ausgelagert (gleiche Baseline).
+# Device-Erstellung ist ausgelagert (gleiche Baseline).
 #
-#   Tape:           QuantumTape-Kontext befüllen (kein execute)
-#   QNode no cache: QNode-Funktion definieren + ersten Aufruf (Tracing)
-#   QNode cached:   QNode-Funktion definieren + ersten Aufruf (Tracing + Caching)
+#   Tape:   QuantumTape-Kontext befüllen (kein execute)
+#   QNode:  qml.workflow.construct_tape → Tracing + Tape-Aufbau (kein execute)
+#
+# cache=True/False ist hier irrelevant: der Cache betrifft nur
+# Ausführungsergebnisse (keyed auf Tape-Hash), nicht das Tracing —
+# daher genügt im Creation-Modus eine einzige QNode-Linie.
 
 def runner_creation_tape(num_qubits: int, gate_sequence: list):
     def run():
@@ -215,32 +241,17 @@ def runner_creation_tape(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_creation_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_creation_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    def run():
-        @qml.qnode(dev, cache=False)
-        def circuit():
-            for gn, ws, ps in gate_sequence:
-                apply_gate(gn, ws, ps)
-            return qml.probs(wires=range(num_qubits))
-
-        circuit()   # erster Aufruf = Tracing
-
-    return run
-
-
-def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    @qml.qnode(dev)
+    def circuit():
+        for gn, ws, ps in gate_sequence:
+            apply_gate(gn, ws, ps)
+        return qml.probs(wires=range(num_qubits))
 
     def run():
-        @qml.qnode(dev, cache=True)
-        def circuit():
-            for gn, ws, ps in gate_sequence:
-                apply_gate(gn, ws, ps)
-            return qml.probs(wires=range(num_qubits))
-
-        circuit()   # erster Aufruf = Tracing + Caching
+        qml.workflow.construct_tape(circuit)()   # nur Tracing + Tape-Aufbau
 
     return run
 
@@ -294,138 +305,156 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung.
 #
-#   Trainierbare Schicht: RY(params[i]) pro Qubit, dann Gate-Block
+#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird
+#   durch trainierbare RY(params[k]) ERSETZT, zyklisch auf die Qubits verteilt
+#   (wires = k % num_qubits). Die restlichen 80% bleiben fester Gate-Block.
+#   Die Gesamt-Gatterzahl bleibt damit total_gates; die Zahl der Ableitungs-
+#   richtungen (Parameter) wächst nun mit total_gates mit.
 #   Ausgabe: Erwartungswert ⟨Z₀⟩
+#
+#   HINWEIS (Entartung): Sobald n_trainable > num_qubits, liegen mehrere RY auf
+#   demselben Qubit direkt hintereinander und kollabieren mathematisch zu einem
+#   RY(Summe) — die Parameter sind dann redundant und der Circuit ist über-
+#   parametrisiert. Für die reine ZEITMESSUNG irrelevant, da der Simulator jedes
+#   RY einzeln als Matrixmultiplikation ausführt (kein Auto-Merge).
 #
 # QNode-Linien nutzen diff_method="best" (auf default.qubit → Backprop) —
 # identisch zum Executor der Abstraktionsschicht (pennylane_executor.py,
 # QNode mit diff_method="best"). Dadurch messen Roh-Benchmark und
 # Executor-Benchmark denselben Gradienten-Algorithmus, und die Differenz
 # Executor − Roh ist der reine Abstraktions-Overhead.
+# VORAUSSETZUNG dafür ist, dass beide Benchmarks denselben Circuit bauen:
+# logarithmic_benchmark_abstraction.py nutzt dieselbe TRAINABLE_RATIO-Ersetzung
+# (split_trainable/build_abstract_trainable dort) — die beiden TRAINABLE_RATIO-
+# Werte müssen synchron bleiben.
 #
 # ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
-# da Backprop nur über das QNode-Interface verfügbar ist — sie ist daher im
-# Gradient-Modus NICHT direkt mit den QNode-Linien vergleichbar.
+# das 2 Tapes PRO trainierbarem Parameter erzeugt — also 2·TRAINABLE_RATIO·
+# total_gates Tapes. Der Tape-Aufbau im Builder skaliert damit ~O(total_gates²)
+# (gemessen bei RATIO=0.3: 2.7 s / 22 MiB bei 2069 Gattern, 47.5 s / 370 MiB
+# bei 8859; extrapoliert ~1.7 h / ~46 GiB bei 100000 → Speicherüberlauf).
+# Die Tape-Linie ist also nur bis ~10⁴ Gatter praktikabel. Adjoint-
+# Differentiation (device.compute_derivatives) wäre die parameterzahl-
+# unabhängige Alternative. Die Tape-Linie ist zudem NICHT direkt mit den
+# QNode-Linien (Backprop) vergleichbar.
 #
 #   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
 #   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
-#   QNode cached:   qml.grad(circuit)(params) — nur Simulation (Graph gecacht)
+#   QNode cached:   identisch zu no cache — cache=True cached nur Ausführungs-
+#                   ergebnisse (keyed auf Tape-Hash) und greift bei Backprop nie;
+#                   gemessen ist die Linie durch den Hash-Overhead sogar
+#                   ~10-20 % LANGSAMER, nicht schneller.
 
-# ---------------------------------------------------------
-# Stufen-Zerlegung des Gradienten (build / exec / grad)
-# ---------------------------------------------------------
-# Der Modus bleibt inhaltlich unverändert: "total" ist exakt die bisherige
-# Gradienten-Gesamtzeit. Zusätzlich wird diese Gesamtzeit in drei Stufen
-# aufgeteilt: Bauen (Tracing/Ableitungs-Tapes), Ausführen (Forward-Simulation)
-# und Gradient (Backprop bzw. Param-Shift-Rest).
-#
-#  Tape (Param-Shift):  build/exec/grad sind DIREKT gemessen (expliziter Code):
-#                       build = param_shift-Tapes bleiben (wie gehabt) im Setup
-#                               → build-Anteil hier 0, exec = execute, grad = fn.
-#  QNode (Backprop):    ein einziger qml.grad(...)-Aufruf lässt sich nicht intern
-#                       auftrennen. Daher werden Bauen (construct_tape) und
-#                       Ausführen (execute des vorgebauten Tapes) als Proxys
-#                       isoliert gemessen; der Gradient-Rest = total − build − exec.
-#                       Fällt der Rest (Messrauschen / Ergebnis-Cache) negativ aus,
-#                       werden build/exec so reskaliert, dass die Summe exakt der
-#                       gemessenen Gesamtzeit entspricht (grad = 0).
 
-def _split_total(tt: float, tb: float, te: float) -> tuple:
-    """Additive Aufteilung: build + exec + grad == tt (immer, ohne Überlauf)."""
-    s = tb + te
-    if s > tt and s > 0.0:
-        scale = tt / s
-        return tb * scale, te * scale, 0.0
-    return tb, te, tt - tb - te
+# Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
+# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_abstraction.py synchron sein.
+TRAINABLE_RATIO = 0.3
+
+
+def split_trainable(gate_sequence: list):
+    """Teilt die Sequenz in (n_trainable, fixed_gates).
+
+    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
+    der Rest bleibt fest. Es gilt
+        n_trainable + len(fixed_gates) == len(gate_sequence),
+    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    """
+    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
+    fixed_gates = gate_sequence[n_trainable:]
+    return n_trainable, fixed_gates
 
 
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
-    dev    = qml.device("default.qubit", wires=num_qubits)
-    params = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    params                   = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
     with qml.tape.QuantumTape() as tape:
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         qml.expval(qml.PauliZ(0))
 
-    grad_tapes, fn = qml.gradients.param_shift(tape)   # Ableitungs-Tapes im Setup
+    # Nur nach den trainierbaren RY ableiten. Ein rohes QuantumTape setzt
+    # trainable_params sonst auf ALLE Parameter (inkl. der festen Winkel der
+    # fixed_gates) und ignoriert requires_grad — anders als das QNode-Interface.
+    # Ohne diese Zeile würde die Tape-Linie nach mehr Parametern ableiten als die
+    # QNode-Linien und wäre nicht mit ihnen vergleichbar.
+    tape.trainable_params = list(range(n_trainable))
 
-    def staged() -> dict:
-        t0 = time.perf_counter(); results = qml.execute(grad_tapes, dev); te = time.perf_counter() - t0
-        t0 = time.perf_counter(); fn(results);                            tg = time.perf_counter() - t0
-        return {"build": 0.0, "exec": te, "grad": tg, "total": te + tg}
+    grad_tapes, fn = qml.gradients.param_shift(tape)
 
-    def total():
+    def run():
         results = qml.execute(grad_tapes, dev)
         return fn(results)
 
-    return {"staged": staged, "total": total}
+    return run
 
 
 def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
 
     @qml.qnode(dev, cache=False, diff_method="best")
     def circuit(params):
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
-    def staged() -> dict:
-        t0 = time.perf_counter(); tp = qml.workflow.construct_tape(circuit)(params); tb = time.perf_counter() - t0
-        t0 = time.perf_counter(); qml.execute([tp], dev);                            te = time.perf_counter() - t0
-        t0 = time.perf_counter(); grad_fn(params.copy());                            tt = time.perf_counter() - t0
-        tb, te, tg = _split_total(tt, tb, te)
-        return {"build": tb, "exec": te, "grad": tg, "total": tt}
-
-    def total():
+    def run():
         grad_fn(params.copy())
 
-    return {"staged": staged, "total": total}
+    return run
 
 
 def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
 
     @qml.qnode(dev, cache=True, diff_method="best")
     def circuit(params):
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
-    def staged() -> dict:
-        t0 = time.perf_counter(); tp = qml.workflow.construct_tape(circuit)(params); tb = time.perf_counter() - t0
-        t0 = time.perf_counter(); qml.execute([tp], dev);                            te = time.perf_counter() - t0
-        t0 = time.perf_counter(); grad_fn(params.copy());                            tt = time.perf_counter() - t0
-        tb, te, tg = _split_total(tt, tb, te)
-        return {"build": tb, "exec": te, "grad": tg, "total": tt}
-
-    def total():
+    def run():
         grad_fn(params.copy())
 
-    return {"staged": staged, "total": total}
+    return run
 
 
 # =========================================================
-# Modus → Runner-Tripel auflösen
+# Modus → Runner-Liste auflösen
 # =========================================================
+# Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
+# Creation hat nur zwei Linien (nc/c dort bedeutungslos, s.o.).
 
 MODE_RUNNERS = {
-    "creation":  (runner_creation_tape,  runner_creation_qnode_nc,  runner_creation_qnode_c),
-    "execution": (runner_execution_tape, runner_execution_qnode_nc, runner_execution_qnode_c),
-    "gradient":  (runner_gradient_tape,  runner_gradient_qnode_nc,  runner_gradient_qnode_c),
+    "creation": [
+        ("tape",  "Tape",  "tab:blue",   runner_creation_tape),
+        ("qnode", "QNode", "tab:orange", runner_creation_qnode),
+    ],
+    "execution": [
+        ("tape", "Tape",             "tab:blue",   runner_execution_tape),
+        ("qnc",  "QNode (no cache)", "tab:orange", runner_execution_qnode_nc),
+        ("qc",   "QNode (cached)",   "tab:green",  runner_execution_qnode_c),
+    ],
+    "gradient": [
+        ("tape", "Tape",             "tab:blue",   runner_gradient_tape),
+        ("qnc",  "QNode (no cache)", "tab:orange", runner_gradient_qnode_nc),
+        ("qc",   "QNode (cached)",   "tab:green",  runner_gradient_qnode_c),
+    ],
 }
 
 MODE_LABELS = {
@@ -434,7 +463,8 @@ MODE_LABELS = {
     "gradient":  "Gradienten-Berechnungszeit",
 }
 
-build_tape, build_qnc, build_qc = MODE_RUNNERS[BENCHMARK_MODE]
+# "all" → alle Modi in Definitionsreihenfolge, sonst nur der gewählte
+MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MODE]
 
 # =========================================================
 # Timing
@@ -454,29 +484,6 @@ def measure_runtime(func, repeats: int = 5) -> dict:
         "min": float(np.min(times)),
         "max": float(np.max(times)),
     }
-
-
-def _stats(vals: list) -> dict:
-    return {
-        "avg": float(np.mean(vals)),
-        "std": float(np.std(vals)),
-        "min": float(np.min(vals)),
-        "max": float(np.max(vals)),
-    }
-
-
-def measure_runtime_staged(staged_func, repeats: int = 5) -> dict:
-    """Wie measure_runtime, aber staged_func() liefert je Aufruf ein dict
-    {"build","exec","grad","total"}. Gibt pro Stufe (inkl. "total") Statistiken
-    zurück: {stufe: {"avg","std","min","max"}}."""
-    staged_func()   # Warm-up
-    acc = {"build": [], "exec": [], "grad": [], "total": []}
-    for _ in range(repeats):
-        gc.collect()
-        d = staged_func()
-        for k in acc:
-            acc[k].append(d[k])
-    return {k: _stats(v) for k, v in acc.items()}
 
 # =========================================================
 # Speicher-Messung (Peak via tracemalloc)
@@ -504,104 +511,59 @@ def measure_memory(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
-# Benchmark-Schleife
+# Benchmark-Schleife (ein Modus)
 # =========================================================
 
-results = []
-first_write = True   # Header nur beim allerersten Schreiben
+def run_benchmark(mode: str) -> pd.DataFrame:
+    runners  = MODE_RUNNERS[mode]
+    csv_file = RUN_DIR / f"benchmark_{GATE_SET_CHOICE}_{mode}.csv"
 
-for num_qubits in QUBIT_CONFIGS:
-    for total_gates in GATE_CONFIGS:
+    results = []
+    first_write = True   # Header nur beim allerersten Schreiben
 
-        print(f"Qubits={num_qubits}  Gates={total_gates}")
+    for num_qubits in QUBIT_CONFIGS:
+        for total_gates in GATE_CONFIGS:
 
-        gate_sequence = generate_gate_sequence(
-            num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
-        )
+            print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-        if BENCHMARK_MODE == "gradient":
-            # Gradient-Runner liefern {"staged","total"}: Stufen-Timing (build/
-            # exec/grad, summiert = Gesamt) + Gesamt-Speicher (unveränderter Modus).
-            runners = {
-                "tape": build_tape(num_qubits, gate_sequence),
-                "qnc":  build_qnc(num_qubits,  gate_sequence),
-                "qc":   build_qc(num_qubits,   gate_sequence),
-            }
-            stage_stats = {m: measure_runtime_staged(r["staged"], REPEATS) for m, r in runners.items()}
-            mem         = {m: measure_memory(r["total"], REPEATS)          for m, r in runners.items()}
-
-            print(
-                f"  tape={stage_stats['tape']['total']['avg']:.5f}s  "
-                f"qnode_nc={stage_stats['qnc']['total']['avg']:.5f}s  "
-                f"qnode_c={stage_stats['qc']['total']['avg']:.5f}s"
+            gate_sequence = generate_gate_sequence(
+                num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
             )
 
             row = {
                 "timestamp":      datetime.now().isoformat(),
                 "gate_set":       GATE_SET_CHOICE,
-                "benchmark_mode": BENCHMARK_MODE,
+                "benchmark_mode": mode,
                 "num_qubits":     num_qubits,
                 "total_gates":    total_gates,
             }
-            for m in ("tape", "qnc", "qc"):
-                # Gesamtzeit (Spalten wie bisher → bestehende Zeit-Plots bleiben gültig)
-                row.update({f"{m}_{k}": v for k, v in stage_stats[m]["total"].items()})
-                # Stufen-Zeiten
-                for stage in ("build", "exec", "grad"):
-                    row.update({f"{m}_{stage}_{k}": v for k, v in stage_stats[m][stage].items()})
-                # Speicher (Gesamt, unverändert)
-                row.update({f"{m}_mem_{k}": v for k, v in mem[m].items()})
-        else:
-            tape_runner = build_tape(num_qubits, gate_sequence)
-            qnc_runner  = build_qnc(num_qubits,  gate_sequence)
-            qc_runner   = build_qc(num_qubits,   gate_sequence)
 
-            tape_stats = measure_runtime(tape_runner, REPEATS)
-            qnc_stats  = measure_runtime(qnc_runner,  REPEATS)
-            qc_stats   = measure_runtime(qc_runner,   REPEATS)
+            log_parts = []
+            for prefix, _label, _color, builder in runners:
+                runner = builder(num_qubits, gate_sequence)
+                stats  = measure_runtime(runner, REPEATS)
+                mem    = measure_memory(runner, REPEATS)
+                row.update({f"{prefix}_{k}":     v for k, v in stats.items()})
+                row.update({f"{prefix}_mem_{k}": v for k, v in mem.items()})
+                log_parts.append(f"{prefix}={stats['avg']:.5f}s/{mem['avg']:.1f}MiB")
 
-            tape_mem = measure_memory(tape_runner, REPEATS)
-            qnc_mem  = measure_memory(qnc_runner,  REPEATS)
-            qc_mem   = measure_memory(qc_runner,   REPEATS)
+            print("  " + "  ".join(log_parts))
+            results.append(row)
 
-            print(
-                f"  tape={tape_stats['avg']:.5f}s/{tape_mem['avg']:.1f}MiB  "
-                f"qnode_nc={qnc_stats['avg']:.5f}s/{qnc_mem['avg']:.1f}MiB  "
-                f"qnode_c={qc_stats['avg']:.5f}s/{qc_mem['avg']:.1f}MiB"
-            )
+            # Zwischenergebnis sofort anhängen → überlebt einen Absturz
+            pd.DataFrame([row]).to_csv(csv_file, mode="a", header=first_write, index=False)
+            first_write = False
 
-            row = {
-                "timestamp":      datetime.now().isoformat(),
-                "gate_set":       GATE_SET_CHOICE,
-                "benchmark_mode": BENCHMARK_MODE,
-                "num_qubits":     num_qubits,
-                "total_gates":    total_gates,
-                **{f"tape_{k}":     v for k, v in tape_stats.items()},
-                **{f"qnc_{k}":      v for k, v in qnc_stats.items()},
-                **{f"qc_{k}":       v for k, v in qc_stats.items()},
-                **{f"tape_mem_{k}": v for k, v in tape_mem.items()},
-                **{f"qnc_mem_{k}":  v for k, v in qnc_mem.items()},
-                **{f"qc_mem_{k}":   v for k, v in qc_mem.items()},
-            }
-        results.append(row)
-
-        # Zwischenergebnis sofort anhängen → überlebt einen Absturz
-        pd.DataFrame([row]).to_csv(CSV_FILE, mode="a", header=first_write, index=False)
-        first_write = False
+    print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {csv_file}")
+    return pd.DataFrame(results)
 
 # =========================================================
-# CSV speichern
-# =========================================================
-
-df = pd.DataFrame(results)
-print(f"\nErgebnisse gespeichert (inkrementell während des Laufs): {CSV_FILE}")
-
-# =========================================================
-# Plot  (3 Subplots: Tape | QNode no cache | QNode cached)
+# Plot  (ein Subplot pro Qubit-Zahl, eine Linie pro Abstraktion)
 # =========================================================
 
 def plot_metric(
     df: pd.DataFrame,
+    runners: list,
     avg_suffix: str,
     std_suffix: str,
     ylabel: str,
@@ -612,9 +574,8 @@ def plot_metric(
     gate_set   = df["gate_set"].iloc[0]
 
     method_cfg = [
-        ("Tape",              f"tape_{avg_suffix}", f"tape_{std_suffix}", "tab:blue"),
-        ("QNode (no cache)",  f"qnc_{avg_suffix}",  f"qnc_{std_suffix}",  "tab:orange"),
-        ("QNode (cached)",    f"qc_{avg_suffix}",   f"qc_{std_suffix}",   "tab:green"),
+        (label, f"{prefix}_{avg_suffix}", f"{prefix}_{std_suffix}", color)
+        for prefix, label, color, _builder in runners
     ]
 
     n_qubits = len(qubit_vals)
@@ -655,82 +616,33 @@ def plot_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Plot gespeichert: {save_path}")
 
-    plt.show()
 
+# =========================================================
+# Haupt-Ablauf: gewählte Modi nacheinander ausführen
+# =========================================================
+# CSV + Plots werden direkt nach jedem Modus gespeichert (absturzsicher),
+# angezeigt werden alle Plot-Fenster gesammelt am Ende.
 
-def plot_gradient_stages(df: pd.DataFrame, save_path: Path | None = None) -> None:
-    """Gestapelte Stufen-Zerlegung (Bauen + Ausführen + Gradient) der
-    Gradientenzeit. Ein Raster: Zeilen = Methoden, Spalten = Qubit-Zahl.
-    Die gestapelte Höhe entspricht der gemessenen Gesamt-Gradientenzeit
-    (y linear, damit sich die Stufen additiv aufsummieren)."""
-    qubit_vals = sorted(df["num_qubits"].unique())
-    gate_set   = df["gate_set"].iloc[0]
+for mode in MODES_TO_RUN:
+    print(f"\n========== Modus: {mode!r} ==========\n")
 
-    methods = [("Tape (Param-Shift)", "tape"),
-               ("QNode (no cache)",   "qnc"),
-               ("QNode (cached)",     "qc")]
-    stages  = [("Bauen",     "build", "tab:blue"),
-               ("Ausführen", "exec",  "tab:orange"),
-               ("Gradient",  "grad",  "tab:green")]
+    df         = run_benchmark(mode)
+    runners    = MODE_RUNNERS[mode]
+    mode_label = MODE_LABELS[mode]
+    stub       = f"benchmark_{GATE_SET_CHOICE}_{mode}"
 
-    nrows, ncols = len(methods), len(qubit_vals)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
-
-    fig.suptitle(
-        f"Gradient – Stufen-Zerlegung (gestapelt)  |  Gate-Set: {gate_set!r} "
-        f"({', '.join(ACTIVE_GATE_SET)})",
-        fontsize=14, fontweight="bold", y=1.005,
+    # --- Laufzeit ---
+    plot_metric(
+        df, runners, avg_suffix="avg", std_suffix="std",
+        ylabel="Zeit (s)", title=mode_label,
+        save_path=RUN_DIR / f"{stub}_time.png",
     )
 
-    for r, (m_label, m_key) in enumerate(methods):
-        for c, nq in enumerate(qubit_vals):
-            ax  = axes[r][c]
-            sub = df[df["num_qubits"] == nq].sort_values("total_gates")
-            x   = sub["total_gates"].values
-            ys  = [np.maximum(sub[f"{m_key}_{s_key}_avg"].values, 0.0)
-                   for _, s_key, _ in stages]
+    # --- Speicherverbrauch (Peak, tracemalloc) ---
+    plot_metric(
+        df, runners, avg_suffix="mem_avg", std_suffix="mem_std",
+        ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
+        save_path=RUN_DIR / f"{stub}_mem.png",
+    )
 
-            ax.stackplot(x, *ys,
-                         labels=[s[0] for s in stages],
-                         colors=[s[2] for s in stages], alpha=0.85)
-
-            ax.set_xscale("log")
-            ax.set_xlabel("Anzahl Gatter", fontsize=10)
-            ax.set_ylabel("Zeit (s)", fontsize=10)
-            ax.set_title(f"{m_label} – {nq} Qubits", fontsize=11, fontweight="bold")
-            if r == 0 and c == 0:
-                ax.legend(fontsize=8, loc="upper left")
-            ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
-            ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
-            ax.xaxis.set_minor_formatter(ticker.NullFormatter())
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"Plot gespeichert: {save_path}")
-
-    plt.show()
-
-
-mode_label = MODE_LABELS[BENCHMARK_MODE]
-
-# --- Laufzeit ---
-PLOT_FILE = RUN_DIR / f"{_stub}_time.png"
-plot_metric(
-    df, avg_suffix="avg", std_suffix="std",
-    ylabel="Zeit (s)", title=mode_label,
-    save_path=PLOT_FILE,
-)
-
-# --- Speicherverbrauch (Peak, tracemalloc) ---
-MEM_PLOT_FILE = RUN_DIR / f"{_stub}_mem.png"
-plot_metric(
-    df, avg_suffix="mem_avg", std_suffix="mem_std",
-    ylabel="Peak-Speicher (MiB)", title=f"Speicherverbrauch (Peak) – {mode_label}",
-    save_path=MEM_PLOT_FILE,
-)
-
-# --- Gradient: gestapelte Stufen-Zerlegung (build / exec / grad) ---
-if BENCHMARK_MODE == "gradient":
-    plot_gradient_stages(df, save_path=RUN_DIR / f"{_stub}_stages.png")
+plt.show()
