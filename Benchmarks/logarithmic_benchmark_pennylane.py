@@ -284,7 +284,7 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung.
 #
-#   Trainierbare Schicht: die ersten TRAINABLE_RATIO der Gatter (20%) werden
+#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird
 #   durch trainierbare RY(params[k]) ERSETZT, zyklisch auf die Qubits verteilt
 #   (wires = k % num_qubits). Die restlichen 80% bleiben fester Gate-Block.
 #   Die Gesamt-Gatterzahl bleibt damit total_gates; die Zahl der Ableitungs-
@@ -302,22 +302,32 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # QNode mit diff_method="best"). Dadurch messen Roh-Benchmark und
 # Executor-Benchmark denselben Gradienten-Algorithmus, und die Differenz
 # Executor − Roh ist der reine Abstraktions-Overhead.
+# VORAUSSETZUNG dafür ist, dass beide Benchmarks denselben Circuit bauen:
+# logarithmic_benchmark_abstraction.py (build_abstract_trainable) nutzt noch
+# die alte Schicht (1 RY pro Qubit + VOLLER Gate-Block) — solange dort nicht
+# dieselbe TRAINABLE_RATIO-Ersetzung eingebaut ist, ist der Overhead-Vergleich
+# im Gradient-Modus NICHT gültig.
 #
 # ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
-# das 2 Tapes PRO trainierbarem Parameter erzeugt. Da die Parameterzahl jetzt
-# mit total_gates mitwächst (20%), wird die Tape-Linie bei großen GATE_CONFIGS
-# sehr teuer (100000 Gatter → 20000 Params → 40000 Tapes) und ist praktisch der
-# limitierende Faktor. Adjoint-Differentiation (device.compute_derivatives) wäre
-# die parameterzahl-unabhängige Alternative. Die Tape-Linie ist zudem NICHT
-# direkt mit den QNode-Linien (Backprop) vergleichbar.
+# das 2 Tapes PRO trainierbarem Parameter erzeugt — also 2·TRAINABLE_RATIO·
+# total_gates Tapes. Der Tape-Aufbau im Builder skaliert damit ~O(total_gates²)
+# (gemessen bei RATIO=0.3: 2.7 s / 22 MiB bei 2069 Gattern, 47.5 s / 370 MiB
+# bei 8859; extrapoliert ~1.7 h / ~46 GiB bei 100000 → Speicherüberlauf).
+# Die Tape-Linie ist also nur bis ~10⁴ Gatter praktikabel. Adjoint-
+# Differentiation (device.compute_derivatives) wäre die parameterzahl-
+# unabhängige Alternative. Die Tape-Linie ist zudem NICHT direkt mit den
+# QNode-Linien (Backprop) vergleichbar.
 #
 #   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
 #   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
-#   QNode cached:   qml.grad(circuit)(params) — nur Simulation (Graph gecacht)
+#   QNode cached:   identisch zu no cache — cache=True cached nur Ausführungs-
+#                   ergebnisse (keyed auf Tape-Hash) und greift bei Backprop nie;
+#                   gemessen ist die Linie durch den Hash-Overhead sogar
+#                   ~10-20 % LANGSAMER, nicht schneller.
 
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
-TRAINABLE_RATIO = 0.2
+TRAINABLE_RATIO = 0.3
 
 
 def split_trainable(gate_sequence: list):
