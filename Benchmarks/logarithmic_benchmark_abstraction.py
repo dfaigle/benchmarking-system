@@ -80,7 +80,9 @@ GATE_SET_CHOICE = "non_clifford"
 #  "creation"  → Zeit, aus der Gatter-Sequenz einen lauffähigen Zustand
 #                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
 #  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
-#  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩ nach trainierbarer RY-Schicht).
+#  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; die ersten TRAINABLE_RATIO der
+#                Gatter sind durch trainierbare RY ersetzt — identisch zum
+#                Roh-Benchmark, Gesamt-Gatterzahl bleibt total_gates).
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner.
 #
@@ -215,14 +217,38 @@ def build_abstract(num_qubits: int, sequence: list) -> AbstractQuantumCircuit:
     return qc
 
 
+# Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
+# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py synchron sein,
+# sonst bauen Roh- und Executor-Benchmark verschiedene Circuits und die
+# Overhead-Differenz (Executor − Roh) ist im Gradient-Modus ungültig.
+TRAINABLE_RATIO = 0.3
+
+
+def split_trainable(gate_sequence: list):
+    """Teilt die Sequenz in (n_trainable, fixed_gates) — identisch zum Roh-Benchmark.
+
+    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
+    der Rest bleibt fest. Es gilt
+        n_trainable + len(fixed_gates) == len(gate_sequence),
+    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    """
+    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
+    fixed_gates = gate_sequence[n_trainable:]
+    return n_trainable, fixed_gates
+
+
 def build_abstract_trainable(
-    num_qubits: int, sequence: list, theta: ParameterVector
+    num_qubits: int, n_trainable: int, fixed_gates: list, theta: ParameterVector
 ) -> AbstractQuantumCircuit:
-    """Trainierbare RY-Schicht (ein Parameter je Qubit) + Gate-Block."""
+    """Trainierbare RY-Schicht + fester Rest-Gate-Block — identisch zum Roh-Benchmark.
+
+    Die RY ersetzen die ersten n_trainable Gatter der Original-Sequenz und werden
+    zyklisch auf die Qubits verteilt (wire = k % num_qubits).
+    """
     qc = AbstractQuantumCircuit(num_qubits)
-    for i in range(num_qubits):
-        qc.ry(i, theta[i])
-    for gn, ws, ps in sequence:
+    for k in range(n_trainable):
+        qc.ry(k % num_qubits, theta[k])
+    for gn, ws, ps in fixed_gates:
         apply_abstract(qc, gn, ws, ps)
     return qc
 
@@ -267,10 +293,12 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
     if mode == "gradient":
         z0 = "I" * (num_qubits - 1) + "Z"          # ⟨Z₀⟩ (little-endian)
         obs = AbstractQuantumOperator(paulis=[z0], coeffs=[1.0])
-        values = np.zeros(num_qubits).tolist()
 
-        theta = ParameterVector("x", num_qubits)
-        qc_abs = build_abstract_trainable(num_qubits, sequence, theta)
+        n_trainable, fixed_gates = split_trainable(sequence)
+        values = np.zeros(n_trainable).tolist()
+
+        theta = ParameterVector("x", n_trainable)
+        qc_abs = build_abstract_trainable(num_qubits, n_trainable, fixed_gates, theta)
         op = ex.transpile_operator(obs)
 
         def r_qnc():
