@@ -34,11 +34,22 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "clifford"               → H, S, CNOT, PauliX/Y/Z
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
+#  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift  (ohne Rot/Toffoli —
+#                             1:1 vergleichbar mit "non_clifford" des
+#                             Executor-Benchmarks, s. Definition unten)
 #  "clifford_t"             → H, T, CNOT
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-GATE_SET_CHOICE = "non_clifford"
+# ACHTUNG Vergleichbarkeit mit logarithmic_benchmark_abstraction.py:
+# rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
+# eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
+# Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
+# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable".
+# NICHT vergleichbar: "non_clifford" (10 statt 8 Gatter) und "rot_cnot".
+#
+GATE_SET_CHOICE = "non_clifford_comparable"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -77,6 +88,15 @@ NON_CLIFFORD_GATES = [
     "CRX", "CRY", "CRZ", "ControlledPhaseShift", "Toffoli",
 ]
 
+# Spiegelt Position für Position das Set "non_clifford" des Executor-Benchmarks
+# (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
+# UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
+# Seed. Bei Änderungen beide Listen synchron halten!
+NON_CLIFFORD_COMPARABLE_GATES = [
+    "T", "RX", "RY", "RZ",
+    "CRX", "CRY", "CRZ", "ControlledPhaseShift",
+]
+
 UNIVERSAL_GATE_SETS = {
     "clifford_t":             ["Hadamard", "T", "CNOT"],
     "single_qubit_plus_cnot": ["RX", "RY", "RZ", "CNOT"],
@@ -86,8 +106,9 @@ UNIVERSAL_GATE_SETS = {
 
 def resolve_gate_set(choice: str) -> list:
     mapping = {
-        "clifford":     CLIFFORD_GATES,
-        "non_clifford": NON_CLIFFORD_GATES,
+        "clifford":                CLIFFORD_GATES,
+        "non_clifford":            NON_CLIFFORD_GATES,
+        "non_clifford_comparable": NON_CLIFFORD_COMPARABLE_GATES,
         **UNIVERSAL_GATE_SETS,
     }
     if choice not in mapping:

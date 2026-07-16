@@ -21,9 +21,12 @@ des Roh-Benchmarks gemappt:
                            dem Warm-up, jeder weitere identische Aufruf ist ein
                            Cache-Treffer.
 
-Hinweis: Es werden nur Gate-Sets verwendet, die die Abstraktionsschicht
-unterstützt (kein Rot/Toffoli), damit derselbe GATE_SET_CHOICE im Roh-Benchmark
-denselben Schaltkreis erzeugt.
+Hinweis Vergleichbarkeit: Identische Gatter-Sequenzen (gleicher Seed) entstehen
+nur, wenn beide Benchmarks eine Gate-Liste GLEICHER Länge und Reihenfolge
+nutzen — rng.choice zieht Indizes über die Liste. Das gilt für "clifford",
+"clifford_t" und "single_qubit_plus_cnot" (gleicher Name in beiden Skripten)
+sowie für "non_clifford" HIER ↔ "non_clifford_comparable" im Roh-Benchmark.
+Das Roh-Set "non_clifford" (mit Rot/Toffoli, 10 Gatter) ist NICHT vergleichbar.
 """
 
 import gc
@@ -67,9 +70,12 @@ BACKEND_CHOICE = "pennylane"
 #  "clifford_t"             → h, t, cx
 #  "single_qubit_plus_cnot" → rx, ry, rz, cx
 #
-# Namen und Gatter decken sich mit den gleichnamigen Sets des Roh-Benchmarks
-# (nur die von der Abstraktion unterstützten — bei "non_clifford" fehlen daher
-# Rot/Toffoli; die Gatter-Sequenz ist dort also NICHT identisch zum Roh-Benchmark).
+# Vergleichbarkeit mit dem Roh-Benchmark (identische Sequenz bei gleichem Seed):
+#   "clifford", "clifford_t", "single_qubit_plus_cnot" → gleicher Name dort
+#   "non_clifford"                                     → dort "non_clifford_comparable"
+#                                                        wählen (8 Gatter, gleiche
+#                                                        Reihenfolge, ohne Rot/Toffoli)!
+# Das Roh-Set "non_clifford" (10 Gatter) erzeugt eine ANDERE Sequenz.
 #
 GATE_SET_CHOICE = "non_clifford"
 

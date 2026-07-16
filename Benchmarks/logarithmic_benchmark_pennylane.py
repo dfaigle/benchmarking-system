@@ -22,11 +22,22 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "clifford"               → H, S, CNOT, PauliX/Y/Z
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
+#  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift  (ohne Rot/Toffoli —
+#                             1:1 vergleichbar mit "non_clifford" des
+#                             Executor-Benchmarks, s. Definition unten)
 #  "clifford_t"             → H, T, CNOT
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-GATE_SET_CHOICE = "non_clifford"
+# ACHTUNG Vergleichbarkeit mit logarithmic_benchmark_abstraction.py:
+# rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
+# eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
+# Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
+# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable".
+# NICHT vergleichbar: "non_clifford" (10 statt 8 Gatter) und "rot_cnot".
+#
+GATE_SET_CHOICE = "non_clifford_comparable"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -60,6 +71,15 @@ NON_CLIFFORD_GATES = [
     "CRX", "CRY", "CRZ", "ControlledPhaseShift", "Toffoli",
 ]
 
+# Spiegelt Position für Position das Set "non_clifford" des Executor-Benchmarks
+# (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
+# UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
+# Seed. Bei Änderungen beide Listen synchron halten!
+NON_CLIFFORD_COMPARABLE_GATES = [
+    "T", "RX", "RY", "RZ",
+    "CRX", "CRY", "CRZ", "ControlledPhaseShift",
+]
+
 UNIVERSAL_GATE_SETS = {
     "clifford_t":              ["Hadamard", "T", "CNOT"],
     "single_qubit_plus_cnot":  ["RX", "RY", "RZ", "CNOT"],
@@ -72,8 +92,9 @@ UNIVERSAL_GATE_SETS = {
 
 def resolve_gate_set(choice: str) -> list:
     mapping = {
-        "clifford":     CLIFFORD_GATES,
-        "non_clifford": NON_CLIFFORD_GATES,
+        "clifford":                CLIFFORD_GATES,
+        "non_clifford":            NON_CLIFFORD_GATES,
+        "non_clifford_comparable": NON_CLIFFORD_COMPARABLE_GATES,
         **UNIVERSAL_GATE_SETS,
     }
     if choice not in mapping:
@@ -303,10 +324,9 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # Executor-Benchmark denselben Gradienten-Algorithmus, und die Differenz
 # Executor − Roh ist der reine Abstraktions-Overhead.
 # VORAUSSETZUNG dafür ist, dass beide Benchmarks denselben Circuit bauen:
-# logarithmic_benchmark_abstraction.py (build_abstract_trainable) nutzt noch
-# die alte Schicht (1 RY pro Qubit + VOLLER Gate-Block) — solange dort nicht
-# dieselbe TRAINABLE_RATIO-Ersetzung eingebaut ist, ist der Overhead-Vergleich
-# im Gradient-Modus NICHT gültig.
+# logarithmic_benchmark_abstraction.py nutzt dieselbe TRAINABLE_RATIO-Ersetzung
+# (split_trainable/build_abstract_trainable dort) — die beiden TRAINABLE_RATIO-
+# Werte müssen synchron bleiben.
 #
 # ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
 # das 2 Tapes PRO trainierbarem Parameter erzeugt — also 2·TRAINABLE_RATIO·
@@ -327,6 +347,7 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
+# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_abstraction.py synchron sein.
 TRAINABLE_RATIO = 0.3
 
 
