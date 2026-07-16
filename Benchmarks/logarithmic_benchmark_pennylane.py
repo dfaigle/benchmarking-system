@@ -284,8 +284,18 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung.
 #
-#   Trainierbare Schicht: RY(params[i]) pro Qubit, dann Gate-Block
+#   Trainierbare Schicht: die ersten TRAINABLE_RATIO der Gatter (20%) werden
+#   durch trainierbare RY(params[k]) ERSETZT, zyklisch auf die Qubits verteilt
+#   (wires = k % num_qubits). Die restlichen 80% bleiben fester Gate-Block.
+#   Die Gesamt-Gatterzahl bleibt damit total_gates; die Zahl der Ableitungs-
+#   richtungen (Parameter) wächst nun mit total_gates mit.
 #   Ausgabe: Erwartungswert ⟨Z₀⟩
+#
+#   HINWEIS (Entartung): Sobald n_trainable > num_qubits, liegen mehrere RY auf
+#   demselben Qubit direkt hintereinander und kollabieren mathematisch zu einem
+#   RY(Summe) — die Parameter sind dann redundant und der Circuit ist über-
+#   parametrisiert. Für die reine ZEITMESSUNG irrelevant, da der Simulator jedes
+#   RY einzeln als Matrixmultiplikation ausführt (kein Auto-Merge).
 #
 # QNode-Linien nutzen diff_method="best" (auf default.qubit → Backprop) —
 # identisch zum Executor der Abstraktionsschicht (pennylane_executor.py,
@@ -294,23 +304,53 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # Executor − Roh ist der reine Abstraktions-Overhead.
 #
 # ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
-# da Backprop nur über das QNode-Interface verfügbar ist — sie ist daher im
-# Gradient-Modus NICHT direkt mit den QNode-Linien vergleichbar.
+# das 2 Tapes PRO trainierbarem Parameter erzeugt. Da die Parameterzahl jetzt
+# mit total_gates mitwächst (20%), wird die Tape-Linie bei großen GATE_CONFIGS
+# sehr teuer (100000 Gatter → 20000 Params → 40000 Tapes) und ist praktisch der
+# limitierende Faktor. Adjoint-Differentiation (device.compute_derivatives) wäre
+# die parameterzahl-unabhängige Alternative. Die Tape-Linie ist zudem NICHT
+# direkt mit den QNode-Linien (Backprop) vergleichbar.
 #
 #   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
 #   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
 #   QNode cached:   qml.grad(circuit)(params) — nur Simulation (Graph gecacht)
 
+
+# Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
+TRAINABLE_RATIO = 0.2
+
+
+def split_trainable(gate_sequence: list):
+    """Teilt die Sequenz in (n_trainable, fixed_gates).
+
+    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
+    der Rest bleibt fest. Es gilt
+        n_trainable + len(fixed_gates) == len(gate_sequence),
+    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    """
+    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
+    fixed_gates = gate_sequence[n_trainable:]
+    return n_trainable, fixed_gates
+
+
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
-    dev    = qml.device("default.qubit", wires=num_qubits)
-    params = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    params                   = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
     with qml.tape.QuantumTape() as tape:
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         qml.expval(qml.PauliZ(0))
+
+    # Nur nach den trainierbaren RY ableiten. Ein rohes QuantumTape setzt
+    # trainable_params sonst auf ALLE Parameter (inkl. der festen Winkel der
+    # fixed_gates) und ignoriert requires_grad — anders als das QNode-Interface.
+    # Ohne diese Zeile würde die Tape-Linie nach mehr Parametern ableiten als die
+    # QNode-Linien und wäre nicht mit ihnen vergleichbar.
+    tape.trainable_params = list(range(n_trainable))
 
     grad_tapes, fn = qml.gradients.param_shift(tape)
 
@@ -322,18 +362,19 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
 
     @qml.qnode(dev, cache=False, diff_method="best")
     def circuit(params):
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
     def run():
         grad_fn(params.copy())
@@ -342,18 +383,19 @@ def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
 
     @qml.qnode(dev, cache=True, diff_method="best")
     def circuit(params):
-        for i in range(num_qubits):
-            qml.RY(params[i], wires=i)
-        for gn, ws, ps in gate_sequence:
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
             apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(num_qubits), requires_grad=True)
+    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
     def run():
         grad_fn(params.copy())
