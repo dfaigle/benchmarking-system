@@ -280,12 +280,12 @@ def runner_execution_tape(num_qubits: int, gate_sequence: list):
         with qml.tape.QuantumTape() as tape:     # Bauen — im Messfenster
             for gn, ws, ps in gate_sequence:
                 apply_gate(gn, ws, ps)
-            qml.probs(wires=range(num_qubits))
+            qml.expval(qml.PauliZ(0))
         qml.execute([tape], dev)                  # Ausführen
 
     return run
 
-
+## qml.expval(qml.PauliZ(0))
 def runner_execution_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
@@ -293,7 +293,7 @@ def runner_execution_qnode(num_qubits: int, gate_sequence: list):
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        return qml.probs(wires=range(num_qubits))
+        return qml.expval(qml.PauliZ(0))
 
     return circuit                                # Tracing + Simulation pro Aufruf
 
@@ -330,7 +330,7 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
 def runner_gradient_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    @qml.qnode(dev, cache=False, diff_method="parameter-shift")
+    @qml.qnode(dev, cache=True, diff_method="parameter-shift")
     def circuit(params):
         for i in range(num_qubits):
             qml.RY(params[i], wires=i)
@@ -345,6 +345,29 @@ def runner_gradient_qnode(num_qubits: int, gate_sequence: list):
         grad_fn(params.copy())
 
     return run
+
+
+def runner_gradient_qnode_best(num_qubits: int, gate_sequence: list):
+    dev                      = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
+
+    @qml.qnode(dev, cache=True, diff_method="best")
+    def circuit(params):
+        for k in range(n_trainable):
+            qml.RY(params[k], wires=k % num_qubits)
+        for gn, ws, ps in fixed_gates:
+            apply_gate(gn, ws, ps)
+        return qml.expval(qml.PauliZ(0))
+
+    grad_fn = qml.grad(circuit)
+    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
+
+    def run():
+        grad_fn(params.copy())
+
+    return run
+
+
 
 
 # =========================================================
@@ -364,6 +387,8 @@ MODE_RUNNERS = {
     "gradient": [
         ("tape",  "Tape",  "tab:blue",   runner_gradient_tape),
         ("qnode", "QNode", "tab:orange", runner_gradient_qnode),
+        ("qnode", "QNode", "tab:green", runner_gradient_qnode_best),
+
     ],
 }
 
