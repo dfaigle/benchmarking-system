@@ -83,7 +83,7 @@ if hasattr(sys.stdout, "reconfigure"):
 # Gleiche Namen/Listen wie logarithmic_benchmark_pennylane.py → bei gleichem
 # Seed entstehen identische Schaltkreise wie im Roh-Benchmark.
 #
-GATE_SET_CHOICE = "non_clifford_comparable"
+GATE_SET_CHOICE = "clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -305,11 +305,11 @@ def runner_execution_qnode(num_qubits: int, gate_sequence: list):
 
 
 # ------ GRADIENT ------
-# ⟨Z₀⟩-Gradient über die trainierbare Schicht (jedes step-te Gatter durch ein
-# trainierbares RY auf dem Wire des ersetzten Gatters ersetzt, verstreut über
-# den ganzen Circuit — kein RY-Block am Anfang), komplett PRO AUFRUF (Bauen/
-# Tracing → Ableiten → Ausführen → Zusammensetzen). Drei Linien, alle über
-# DENSELBEN Circuit:
+# ⟨Z₀⟩-Gradient über die trainierbare Schicht (jedes step-te Gatter durch eine
+# trainierbare Rotation RX/RY/RZ — zyklisch über k — auf dem Wire des ersetzten
+# Gatters ersetzt, verstreut über den ganzen Circuit, kein RY-Block am Anfang),
+# komplett PRO AUFRUF (Bauen/Tracing → Ableiten → Ausführen → Zusammensetzen).
+# Drei Linien, alle über DENSELBEN Circuit:
 #
 #   tape :  Tape bauen + param_shift + execute      — Parameter-Shift
 #   qps  :  qml.grad, diff_method="parameter-shift" — gleicher Algorithmus wie
@@ -346,6 +346,21 @@ def trainable_layout(n_gates: int):
     return n_trainable, step
 
 
+# Rotationsachsen, die an den trainierbaren Positionen zyklisch (über den Zähler
+# k) eingesetzt werden. Alle drei sind 1-Parameter-Gatter → die Zähl-Logik
+# (param_counter += 1, params[k]) und die Tape-Indizes bleiben unverändert
+# korrekt. Auf ein Set beschränken (z. B. ["RY"]) genügt, um nur eine Achse zu
+# nutzen.
+TRAINABLE_GATES = ["RX", "RY", "RZ"]
+
+
+def apply_trainable(k: int, param, wire: int) -> None:
+    gate = TRAINABLE_GATES[k % len(TRAINABLE_GATES)]
+    if   gate == "RX": qml.RX(param, wires=wire)
+    elif gate == "RY": qml.RY(param, wires=wire)
+    else:              qml.RZ(param, wires=wire)
+
+
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
     dev               = qml.device("default.qubit", wires=num_qubits)
     n_trainable, step = trainable_layout(len(gate_sequence))
@@ -362,7 +377,7 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
         with qml.tape.QuantumTape() as tape:      # Bauen — im Messfenster
             for i, (gn, ws, ps) in enumerate(gate_sequence):
                 if i % step == 0:
-                    qml.RY(params[k], wires=ws[0])
+                    apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
                     trainable_param_idx.append(param_counter)
                     param_counter += 1
                     k += 1
@@ -388,7 +403,7 @@ def runner_gradient_qnode_ps(num_qubits: int, gate_sequence: list):
         k = 0
         for i, (gn, ws, ps) in enumerate(gate_sequence):
             if i % step == 0:
-                qml.RY(params[k], wires=ws[0])
+                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
                 k += 1
             else:
                 apply_gate(gn, ws, ps)
@@ -412,7 +427,7 @@ def runner_gradient_qnode_best(num_qubits: int, gate_sequence: list):
         k = 0
         for i, (gn, ws, ps) in enumerate(gate_sequence):
             if i % step == 0:
-                qml.RY(params[k], wires=ws[0])
+                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
                 k += 1
             else:
                 apply_gate(gn, ws, ps)
