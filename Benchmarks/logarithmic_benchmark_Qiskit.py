@@ -61,13 +61,15 @@ GATE_SET_CHOICE = "non_clifford_comparable"
 #                  estt: QuantumCircuit + transpile + erster Estimator-Run
 #
 #  "execution" → Zeit der reinen Simulation nach dem Aufbau
-#                  qc:   Statevector(circuit).expectation_value(Z₀)
+#                  qc:   Statevector(circuit) — reiner Zustandsvektor OHNE
+#                        Observable (Gegenstück zu ex.statevector)
 #                  est:  StatevectorEstimator.run() – circuit vorgebaut
 #                  estt: StatevectorEstimator.run() – circuit vortranspiliert
 #
 #  "gradient"  → Zeit der Gradienten-Berechnung via Parameter-Shift
-#                  Trainierbare Schicht: RY(θᵢ) pro Qubit, dann Gate-Block
-#                  Ausgabe: ⟨Z₀⟩-Gradient für alle θᵢ
+#                  Trainierbare Schicht: TRAINABLE_RATIO der Gatter durch RY
+#                  ersetzt (identisch zu PennyLane-/Executor-Benchmark)
+#                  Ausgabe: ⟨Z₀⟩-Gradient für alle θₖ
 #                  qc:   Statevector + manueller Param-Shift
 #                  est:  StatevectorEstimator + manueller Param-Shift
 #                  estt: StatevectorEstimator + Param-Shift (vorkompiliert)
@@ -135,7 +137,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5, 10, 15]
+QUBIT_CONFIGS = [5, 8, 10, 12, 15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -271,18 +273,18 @@ def runner_creation_estt(num_qubits: int, gate_sequence: list):
 # Misst: wie lange dauert die Simulation nach dem Aufbau?
 # Circuit und (wo nötig) transpilierter Circuit sind vorgebaut.
 #
-#   qc:   Statevector(circuit).expectation_value(Z₀)
-#   est:  StatevectorEstimator.run() – circuit vorgebaut
+#   qc:   Statevector(circuit) — reiner Zustandsvektor OHNE Observable,
+#         damit 1:1 vergleichbar mit ex.statevector des Executor-Benchmarks
+#   est:  StatevectorEstimator.run() – circuit vorgebaut (mit Observable ⟨Z₀⟩)
 #   estt: StatevectorEstimator.run() – circuit vortranspiliert
 
 def runner_execution_qc(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
     qc = QuantumCircuit(num_qubits)
     for gn, ws, ps in gate_sequence:
         apply_gate(qc, gn, ws, ps)
 
     def run():
-        Statevector(qc).expectation_value(observable)
+        Statevector(qc)
 
     return run
 
@@ -316,25 +318,65 @@ def runner_execution_estt(num_qubits: int, gate_sequence: list):
 
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung via Parameter-Shift.
-# Trainierbare Schicht: RY(θᵢ) pro Qubit, dann Gate-Block.
-# grad_i = [f(θᵢ + π/2) – f(θᵢ – π/2)] / 2
+#
+#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird durch
+#   trainierbare RY(θₖ) ERSETZT, zyklisch auf die Qubits verteilt
+#   (wire = k % num_qubits). Der Rest bleibt fester Gate-Block; die Gesamt-
+#   Gatterzahl bleibt total_gates — identisch zum PennyLane-Roh- und zum
+#   Executor-Benchmark (dort: gleiche Ersetzung, Executor-Qiskit rechnet
+#   ebenfalls Parameter-Shift via OpTree → gleicher Algorithmus).
+#   grad_k = [f(θₖ + π/2) − f(θₖ − π/2)] / 2
+#
+# ACHTUNG Kosten: Parameter-Shift braucht 2 Ausführungen PRO Parameter und
+# PRO Messaufruf. Mit n_trainable = TRAINABLE_RATIO·total_gates wächst der
+# Aufwand je Aufruf ~O(total_gates²) und wird bei großen GATE_CONFIGS sehr
+# teuer — das gilt für Roh- UND Executor-Benchmark gleichermaßen und ist
+# daher fair, aber laufzeitintensiv.
 #
 #   qc:   Statevector + manueller Param-Shift (assign_parameters per Shift)
 #   est:  StatevectorEstimator + Param-Shift (Parameter-Binding im Primitiv)
 #   estt: StatevectorEstimator + Param-Shift (vorkompilierter Circuit)
 
-def runner_gradient_qc(num_qubits: int, gate_sequence: list):
-    observable   = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    pv           = ParameterVector("θ", length=num_qubits)
-    qc           = QuantumCircuit(num_qubits)
-    for i in range(num_qubits):
-        qc.ry(pv[i], i)
-    for gn, ws, ps in gate_sequence:
+# Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
+# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py und
+# logarithmic_benchmark_abstraction.py synchron sein.
+TRAINABLE_RATIO = 0.3
+
+
+def split_trainable(gate_sequence: list):
+    """Teilt die Sequenz in (n_trainable, fixed_gates) — identisch zu den
+    anderen Benchmarks.
+
+    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
+    der Rest bleibt fest. Es gilt
+        n_trainable + len(fixed_gates) == len(gate_sequence),
+    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    """
+    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
+    fixed_gates = gate_sequence[n_trainable:]
+    return n_trainable, fixed_gates
+
+
+def _build_trainable_circuit(num_qubits: int, gate_sequence: list):
+    """Trainierbarer Circuit wie in PennyLane-/Executor-Benchmark:
+    n_trainable RY(θₖ) auf wire k % num_qubits + fester Rest-Gate-Block."""
+    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    pv = ParameterVector("θ", length=n_trainable)
+    qc = QuantumCircuit(num_qubits)
+    for k in range(n_trainable):
+        qc.ry(pv[k], k % num_qubits)
+    for gn, ws, ps in fixed_gates:
         apply_gate(qc, gn, ws, ps)
-    param_values = np.zeros(num_qubits)
+    return qc, pv, n_trainable
+
+
+def runner_gradient_qc(num_qubits: int, gate_sequence: list):
+    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
+    qc, pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
+    param_values = np.zeros(n_trainable)
 
     def run():
-        for i in range(num_qubits):
+        for i in range(n_trainable):
             plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
             minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
             ev_p = Statevector(qc.assign_parameters(dict(zip(pv, plus_vals)))).expectation_value(observable).real
@@ -345,18 +387,13 @@ def runner_gradient_qc(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_est(num_qubits: int, gate_sequence: list):
-    observable   = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator    = StatevectorEstimator()
-    pv           = ParameterVector("θ", length=num_qubits)
-    qc           = QuantumCircuit(num_qubits)
-    for i in range(num_qubits):
-        qc.ry(pv[i], i)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
-    param_values = np.zeros(num_qubits)
+    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
+    estimator  = StatevectorEstimator()
+    qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
+    param_values = np.zeros(n_trainable)
 
     def run():
-        for i in range(num_qubits):
+        for i in range(n_trainable):
             plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
             minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
             ev_p = float(estimator.run([(qc, observable, plus_vals)]).result()[0].data.evs)
@@ -367,19 +404,14 @@ def runner_gradient_est(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_estt(num_qubits: int, gate_sequence: list):
-    observable   = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator    = StatevectorEstimator()
-    pv           = ParameterVector("θ", length=num_qubits)
-    qc           = QuantumCircuit(num_qubits)
-    for i in range(num_qubits):
-        qc.ry(pv[i], i)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
+    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
+    estimator  = StatevectorEstimator()
+    qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
     tc           = transpile(qc, optimization_level=1)
-    param_values = np.zeros(num_qubits)
+    param_values = np.zeros(n_trainable)
 
     def run():
-        for i in range(num_qubits):
+        for i in range(n_trainable):
             plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
             minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
             ev_p = float(estimator.run([(tc, observable, plus_vals)]).result()[0].data.evs)
@@ -392,6 +424,12 @@ def runner_gradient_estt(num_qubits: int, gate_sequence: list):
 # Modus → Runner-Liste auflösen
 # =========================================================
 # Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
+#
+# Vergleich mit dem Executor-Benchmark (BACKEND_CHOICE="qiskit"): Paar-Partner
+# ist die qc-Linie (Statevector-Pfad — der Executor nutzt intern Statevector
+# bzw. OpTree-Param-Shift über einen Estimator). est/estt sind Kontext-Linien
+# ohne Executor-Pendant; die Cache-Spalte (qc) des Executor-Benchmarks nicht
+# paarweise vergleichen (Ergebnis-Cache-Treffer, s. Docstring dort).
 
 MODE_RUNNERS = {
     "creation": [

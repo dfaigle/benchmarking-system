@@ -10,16 +10,23 @@ gleiche GATE_CONFIGS/QUBIT_CONFIGS, gleiche Mess-Methodik, gleiche CSV-Spalten
 fair vergleichen: der Overhead deiner Abstraktion ergibt sich als spaltenweise
 Differenz  Executor − Roh-Framework  für dieselbe Zelle.
 
-Zwei Linien — sie entsprechen genau der einen echten Executor-Option ``caching``
-(``Executor.create(backend, caching=...)``) und sind 1:1 auf die passenden Linien
-des Roh-Benchmarks gemappt:
+Zwei Linien — sie entsprechen der einen echten Executor-Option ``caching``
+(``Executor.create(backend, caching=...)``):
 
-    qnc  (QNode no cache) → Executor mit caching=False (Standardfall): rechnet bei
-                           jedem Aufruf neu (abstrakter Circuit wird je Aufruf
-                           ins native Format übersetzt und simuliert).
-    qc   (QNode cached)   → Executor mit caching=True: der Ergebnis-Cache greift nach
-                           dem Warm-up, jeder weitere identische Aufruf ist ein
-                           Cache-Treffer.
+    qnc  → Executor mit caching=False (Standardfall): rechnet bei jedem Aufruf
+           neu (abstrakter Circuit wird je Aufruf ins native Format übersetzt
+           und simuliert bzw. abgeleitet).
+    qc   → Executor mit caching=True: der Ergebnis-Cache greift nach dem
+           Warm-up, jeder weitere identische Aufruf ist ein Cache-Treffer.
+
+WICHTIG — Overhead-Vergleich (Executor − Roh) NUR über die qnc-Spalten:
+Die qc-Spalten messen bei Roh und Executor fundamental Verschiedenes
+(Roh: PennyLane-Cache vermeidet das Tracing nie, Linie ≈ qnc; Executor:
+Ergebnis-Cache-Treffer ≈ reine Lookup-Zeit). Sie sind einzeln interpretierbar,
+aber NICHT als Differenz. Paar-Partner in den Roh-Benchmarks:
+PennyLane → QNode-qnc-Linie; Qiskit → qc-Linie (Statevector-Pfad).
+Tape- (PennyLane) und est/estt-Linien (Qiskit) sind Kontext ohne
+Executor-Pendant.
 
 Hinweis Vergleichbarkeit: Identische Gatter-Sequenzen (gleicher Seed) entstehen
 nur, wenn beide Benchmarks eine Gate-Liste GLEICHER Länge und Reihenfolge
@@ -83,8 +90,9 @@ GATE_SET_CHOICE = "non_clifford"
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
 # =========================================================
 #
-#  "creation"  → Zeit, aus der Gatter-Sequenz einen lauffähigen Zustand
-#                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
+#  "creation"  → Abstrakten Circuit aufbauen + ins native Format übersetzen
+#                (transpile_circuit, KEIN Execute) — gleiche Ebene wie
+#                construct_tape (PennyLane) / QuantumCircuit befüllen (Qiskit).
 #  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
 #  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; die ersten TRAINABLE_RATIO der
 #                Gatter sind durch trainierbare RY ersetzt — identisch zum
@@ -140,7 +148,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5,10,15]
+QUBIT_CONFIGS = [5, 8, 10, 12, 15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -275,11 +283,15 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
 
     # ------------------------------------------------ creation
     if mode == "creation":
+        # NUR bauen + übersetzen, KEIN Execute: abstrakten Circuit aufbauen und
+        # via transpile_circuit ins native Format bringen. Damit misst creation
+        # dieselbe Ebene wie die Roh-Benchmarks (PennyLane: construct_tape,
+        # Qiskit qc-Linie: QuantumCircuit befüllen — beide ohne Ausführung).
         def r_qnc():
-            ex.statevector(build_abstract(num_qubits, sequence))
+            ex.transpile_circuit(build_abstract(num_qubits, sequence))
 
         def r_qc():
-            ex_cached.statevector(build_abstract(num_qubits, sequence))
+            ex_cached.transpile_circuit(build_abstract(num_qubits, sequence))
 
         return {"qnc": r_qnc, "qc": r_qc}
 

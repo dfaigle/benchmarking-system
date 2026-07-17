@@ -1,3 +1,48 @@
+"""Fairer Vergleich: rohes QuantumTape vs. QNode-Interface (nur PennyLane).
+
+Zweck (Vergleichspaar 1 der Thesis): Was kostet das QNode-Interface gegenüber
+dem direkten Arbeiten mit QuantumTapes — bei GLEICHER Arbeit pro Messaufruf?
+
+Fairness-Prinzip: Beide Linien leisten in jedem Modus exakt dieselbe Arbeit
+innerhalb des Messfensters. Nichts wird für eine Seite vorgebaut, was die
+andere Seite pro Aufruf neu erledigen muss.
+
+    creation  → beide bauen NUR (kein Execute):
+                  Tape:  QuantumTape-Kontext befüllen
+                  QNode: qml.workflow.construct_tape → Tracing + Tape-Aufbau
+    execution → beide bauen + führen aus (pro Aufruf):
+                  Tape:  QuantumTape IM run() befüllen + qml.execute([tape], dev)
+                  QNode: circuit()-Aufruf (Tracing + Simulation), cache=False
+                  Rückgabe beidseitig: qml.probs
+    gradient  → beide berechnen den ⟨Z₀⟩-Gradienten per PARAMETER-SHIFT
+                (gleicher Algorithmus!) über dieselbe trainierbare Schicht:
+                  Tape:  Tape IM run() bauen + qml.gradients.param_shift + execute
+                  QNode: qml.grad(circuit)(params) mit diff_method="parameter-shift"
+
+Die Differenz QNode − Tape ist damit in jedem Modus der reine Overhead des
+QNode-Interfaces (Workflow-Maschinerie, Cache-Prüfung, Interface-Auflösung,
+Ergebnis-Postprocessing) bei identischer Bau-, Simulations- und Algorithmus-Last.
+
+Bewusste Design-Entscheidungen (Abweichungen von logarithmic_benchmark_pennylane.py):
+
+* Nur EINE QNode-Linie (cache=False): Der PennyLane-Cache betrifft nur
+  Ausführungsergebnisse und vermeidet nie das Tracing — eine cached-Linie
+  hätte hier keinen eigenen Informationswert (im Hauptbenchmark wird genau
+  das separat gezeigt).
+* „Nur ausführen" ist für den QNode prinzipiell nicht messbar (Tracing ist
+  bei jedem Aufruf unvermeidbar). Die Referenz „vorgebautes Tape, nur
+  Ausführung" existiert weiterhin im Hauptbenchmark (execution/Tape-Linie).
+* Gradient nutzt die RY-pro-Qubit-Schicht (num_qubits Parameter), NICHT die
+  TRAINABLE_RATIO-Ersetzung der Hauptbenchmarks: Parameter-Shift kostet
+  2 Schaltkreise PRO Parameter UND PRO AUFRUF; mit ratio-skalierter
+  Parameterzahl wäre der Aufwand O(total_gates²) je Messaufruf und bei
+  großen GATE_CONFIGS nicht durchführbar. Für diesen Vergleich zählt nur,
+  dass BEIDE Linien denselben Circuit differenzieren — Konsistenz zu den
+  Executor-Benchmarks ist hier nicht nötig.
+* Gleiche Sequenz-Generierung/Seeds wie der Roh-Benchmark: bei gleichem
+  GATE_SET_CHOICE entstehen exakt dieselben Schaltkreise wie dort.
+"""
+
 import pennylane as qml
 import pennylane.numpy as pnp
 import numpy as np
@@ -23,19 +68,13 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
 #  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
-#                             ControlledPhaseShift  (ohne Rot/Toffoli —
-#                             1:1 vergleichbar mit "non_clifford" des
-#                             Executor-Benchmarks, s. Definition unten)
+#                             ControlledPhaseShift (ohne Rot/Toffoli)
 #  "clifford_t"             → H, T, CNOT
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-# ACHTUNG Vergleichbarkeit mit logarithmic_benchmark_abstraction.py:
-# rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
-# eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
-# Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
-# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable".
-# NICHT vergleichbar: "non_clifford" (10 statt 8 Gatter) und "rot_cnot".
+# Gleiche Namen/Listen wie logarithmic_benchmark_pennylane.py → bei gleichem
+# Seed entstehen identische Schaltkreise wie im Roh-Benchmark.
 #
 GATE_SET_CHOICE = "non_clifford_comparable"
 
@@ -43,25 +82,18 @@ GATE_SET_CHOICE = "non_clifford_comparable"
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
 # =========================================================
 #
-#  "creation"  → Zeit um den Circuit aufzubauen (kein Ausführen)
-#                  Tape:         QuantumTape befüllen
-#                  QNode:        construct_tape  (Tracing + Tape-Aufbau, kein Execute)
-#
-#  "execution" → Zeit der reinen Simulation nach dem Aufbau
-#                  Tape:         qml.execute([tape], dev)
-#                  QNode:        circuit()-Aufruf (nach Warm-up)
-#
-#  "gradient"  → Zeit der Gradienten-Berechnung via Parameter-Shift
-#                  Tape:         qml.gradients.param_shift(tape) + execute
-#                  QNode:        qml.grad(circuit)(params)
-#
-#  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
-#                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
+#  "creation"  → beide Linien: nur bauen (kein Execute)
+#  "execution" → beide Linien: bauen + ausführen pro Aufruf
+#  "gradient"  → beide Linien: Parameter-Shift-Gradient pro Aufruf
+#  "all"       → alle drei Modi nacheinander; eigene CSV + Plots pro Modus
 #
 BENCHMARK_MODE = "all"
 
+# Plots am Ende interaktiv anzeigen? Für Batch-/Headless-Läufe auf False setzen.
+SHOW_PLOTS = True
+
 # =========================================================
-# Gate-Definitionen
+# Gate-Definitionen  (identisch zum Roh-Benchmark)
 # =========================================================
 
 CLIFFORD_GATES = ["Hadamard", "S", "CNOT", "PauliX", "PauliY", "PauliZ"]
@@ -71,10 +103,6 @@ NON_CLIFFORD_GATES = [
     "CRX", "CRY", "CRZ", "ControlledPhaseShift", "Toffoli",
 ]
 
-# Spiegelt Position für Position das Set "non_clifford" des Executor-Benchmarks
-# (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
-# UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
-# Seed. Bei Änderungen beide Listen synchron halten!
 NON_CLIFFORD_COMPARABLE_GATES = [
     "T", "RX", "RY", "RZ",
     "CRX", "CRY", "CRZ", "ControlledPhaseShift",
@@ -86,9 +114,6 @@ UNIVERSAL_GATE_SETS = {
     "rot_cnot":                ["Rot", "CNOT"],
 }
 
-# =========================================================
-# Auflösung der Auswahl
-# =========================================================
 
 def resolve_gate_set(choice: str) -> list:
     mapping = {
@@ -102,6 +127,7 @@ def resolve_gate_set(choice: str) -> list:
         raise ValueError(f"Unbekanntes Gate-Set '{choice}'. Gültig: {valid}")
     return mapping[choice]
 
+
 VALID_MODES = {"creation", "execution", "gradient", "all"}
 if BENCHMARK_MODE not in VALID_MODES:
     raise ValueError(f"Unbekannter Modus '{BENCHMARK_MODE}'. Gültig: {VALID_MODES}")
@@ -111,29 +137,23 @@ print(f"Gate-Set : {GATE_SET_CHOICE!r}  →  {ACTIVE_GATE_SET}")
 print(f"Modus    : {BENCHMARK_MODE!r}\n")
 
 # =========================================================
-# Konfiguration
+# Konfiguration  (identisch zum Roh-Benchmark)
 # =========================================================
 
-RESULT_DIR = Path(__file__).parent.parent / "Results" / "Pennylane"
+RESULT_DIR = Path(__file__).parent.parent / "Results" / "TapeVsQNode"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
 REPEATS = 4
 
 QUBIT_CONFIGS = [5, 8, 10, 12, 15]
-#QUBIT_CONFIGS = [3]   # Schnelltest
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
-# [    10     16     26     43     70    113    183    298    483
-#      785   1274   2069   3360   5456   8859  14384  23357  37927
-#      61585 100000]
-
-# a_n = 10 * (100000 / 10)^(n / 19)
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Pennylane/run_<N>/
+# Pro Lauf ein eigener Unterordner: Results/TapeVsQNode/run_<N>/
 # =========================================================
 
 run = 1
@@ -142,10 +162,8 @@ while (RESULT_DIR / f"run_{run}").exists():
 RUN_DIR = RESULT_DIR / f"run_{run}"
 RUN_DIR.mkdir(parents=True)
 
-# CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
-
 # =========================================================
-# Gate-Eigenschaften
+# Gate-Eigenschaften  (identisch zum Roh-Benchmark)
 # =========================================================
 
 _ANGLE_1  = {"RX", "RY", "RZ", "CRX", "CRY", "CRZ", "ControlledPhaseShift"}
@@ -154,7 +172,7 @@ _NEEDS_2Q = {"CNOT", "CRX", "CRY", "CRZ", "ControlledPhaseShift"}
 _NEEDS_3Q = {"Toffoli"}
 
 # =========================================================
-# Gate-Sequenz generieren
+# Gate-Sequenz generieren  (identische Logik/Seed wie Roh-Benchmark)
 # =========================================================
 # Jedes Element: (gate_name, wires, params)
 
@@ -220,54 +238,30 @@ def apply_gate(gate_name: str, wires: list, params: list) -> None:
 # =========================================================
 # Runner-Builder je Modus
 # =========================================================
+# Builder laufen UNGEMESSEN (Setup: Device, params); nur run() wird getimt.
+# Fairness: beide Linien leisten in run() dieselbe Arbeit — siehe Docstring.
 
 # ------ CREATION ------
-# Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
-# Device-Erstellung ist ausgelagert (gleiche Baseline).
-#
-#   Tape:           QuantumTape-Kontext befüllen (kein execute)
-#   QNode no cache: qml.workflow.construct_tape → Tracing + Tape-Aufbau (kein execute)
-#   QNode cached:   identisch, nur mit cache=True
-#
-# Beide QNode-Linien sind BEWUSST enthalten, obwohl cache=True/False hier
-# nichts ändern kann: der Cache betrifft nur Ausführungsergebnisse (keyed auf
-# Tape-Hash), nicht das Tracing. Die erwartete Deckung der beiden Linien im
-# Plot zeigt genau das empirisch — und hält die CSV-Spalten (qnc_/qc_) über
-# alle Modi und zum Executor-Benchmark konsistent.
+# Beide: nur bauen, kein Execute. Kein Device im Messfenster.
 
 def runner_creation_tape(num_qubits: int, gate_sequence: list):
     def run():
         with qml.tape.QuantumTape() as _tape:
             for gn, ws, ps in gate_sequence:
                 apply_gate(gn, ws, ps)
-            qml.state()
+            qml.probs(wires=range(num_qubits))
 
     return run
 
 
-def runner_creation_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_creation_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
     @qml.qnode(dev, cache=False)
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        return qml.state()
-
-    def run():
-        qml.workflow.construct_tape(circuit)()   # nur Tracing + Tape-Aufbau
-
-    return run
-
-
-def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
-
-    @qml.qnode(dev, cache=True)
-    def circuit():
-        for gn, ws, ps in gate_sequence:
-            apply_gate(gn, ws, ps)
-        return qml.state()
+        return qml.probs(wires=range(num_qubits))
 
     def run():
         qml.workflow.construct_tape(circuit)()   # nur Tracing + Tape-Aufbau
@@ -276,179 +270,76 @@ def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
 
 
 # ------ EXECUTION ------
-# Misst: wie lange dauert die Simulation nach dem Aufbau?
-# Rückgabe ist qml.state() — exakt dieselbe Aufgabe wie ex.statevector im
-# Executor-Benchmark (vorher qml.probs: andere Aufgabe, unfairer Vergleich).
-#
-#   Tape:           qml.execute([tape], dev) — tape ist vorgebaut
-#   QNode no cache: circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=False)
-#   QNode cached:   circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=True;
-#                   der Cache vermeidet das Tracing NICHT, s. Creation-Kommentar)
+# Beide: bauen + ausführen PRO AUFRUF. Das Tape wird bewusst IM Messfenster
+# neu befüllt — nur so trägt es dieselbe Aufbau-Last wie das QNode-Tracing.
 
 def runner_execution_tape(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
-    # Tape einmalig aufbauen
-    with qml.tape.QuantumTape() as tape:
-        for gn, ws, ps in gate_sequence:
-            apply_gate(gn, ws, ps)
-        qml.state()
-
     def run():
-        qml.execute([tape], dev)
+        with qml.tape.QuantumTape() as tape:     # Bauen — im Messfenster
+            for gn, ws, ps in gate_sequence:
+                apply_gate(gn, ws, ps)
+            qml.probs(wires=range(num_qubits))
+        qml.execute([tape], dev)                  # Ausführen
 
     return run
 
 
-def runner_execution_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_execution_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
     @qml.qnode(dev, cache=False)
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        return qml.state()
+        return qml.probs(wires=range(num_qubits))
 
-    return circuit
-
-
-def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
-
-    @qml.qnode(dev, cache=True)
-    def circuit():
-        for gn, ws, ps in gate_sequence:
-            apply_gate(gn, ws, ps)
-        return qml.state()
-
-    return circuit
+    return circuit                                # Tracing + Simulation pro Aufruf
 
 
 # ------ GRADIENT ------
-# Misst: reine Ausführungszeit der Gradienten-Berechnung.
+# Beide: ⟨Z₀⟩-Gradient nach der RY-pro-Qubit-Schicht per PARAMETER-SHIFT,
+# komplett pro Aufruf (Tape bauen bzw. Tracing → Shift-Tapes → Ausführen →
+# Zusammensetzen). Gleicher Algorithmus, gleicher Circuit, gleiche Schicht.
 #
-#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird
-#   durch trainierbare RY(params[k]) ERSETZT, zyklisch auf die Qubits verteilt
-#   (wires = k % num_qubits). Die restlichen 80% bleiben fester Gate-Block.
-#   Die Gesamt-Gatterzahl bleibt damit total_gates; die Zahl der Ableitungs-
-#   richtungen (Parameter) wächst nun mit total_gates mit.
-#   Ausgabe: Erwartungswert ⟨Z₀⟩
-#
-#   HINWEIS (Entartung): Sobald n_trainable > num_qubits, liegen mehrere RY auf
-#   demselben Qubit direkt hintereinander und kollabieren mathematisch zu einem
-#   RY(Summe) — die Parameter sind dann redundant und der Circuit ist über-
-#   parametrisiert. Für die reine ZEITMESSUNG irrelevant, da der Simulator jedes
-#   RY einzeln als Matrixmultiplikation ausführt (kein Auto-Merge).
-#
-# QNode-Linien nutzen diff_method="best" (auf default.qubit → Backprop) —
-# identisch zum Executor der Abstraktionsschicht (pennylane_executor.py,
-# QNode mit diff_method="best"). Dadurch messen Roh-Benchmark und
-# Executor-Benchmark denselben Gradienten-Algorithmus, und die Differenz
-# Executor − Roh ist der reine Abstraktions-Overhead.
-# VORAUSSETZUNG dafür ist, dass beide Benchmarks denselben Circuit bauen:
-# logarithmic_benchmark_abstraction.py nutzt dieselbe TRAINABLE_RATIO-Ersetzung
-# (split_trainable/build_abstract_trainable dort) — die beiden TRAINABLE_RATIO-
-# Werte müssen synchron bleiben.
-#
-# ACHTUNG: Die Tape-Linie bleibt Parameter-Shift (qml.gradients.param_shift),
-# das 2 Tapes PRO trainierbarem Parameter erzeugt — also 2·TRAINABLE_RATIO·
-# total_gates Tapes. Der Tape-Aufbau im Builder skaliert damit ~O(total_gates²)
-# (gemessen bei RATIO=0.3: 2.7 s / 22 MiB bei 2069 Gattern, 47.5 s / 370 MiB
-# bei 8859; extrapoliert ~1.7 h / ~46 GiB bei 100000 → Speicherüberlauf).
-# Die Tape-Linie ist also nur bis ~10⁴ Gatter praktikabel. Adjoint-
-# Differentiation (device.compute_derivatives) wäre die parameterzahl-
-# unabhängige Alternative. Die Tape-Linie ist zudem NICHT direkt mit den
-# QNode-Linien (Backprop) vergleichbar.
-#
-#   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
-#   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
-#   QNode cached:   identisch zu no cache — cache=True cached nur Ausführungs-
-#                   ergebnisse (keyed auf Tape-Hash) und greift bei Backprop nie;
-#                   gemessen ist die Linie durch den Hash-Overhead sogar
-#                   ~10-20 % LANGSAMER, nicht schneller.
-
-
-# Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
-# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_abstraction.py synchron sein.
-TRAINABLE_RATIO = 0.3
-
-
-def split_trainable(gate_sequence: list):
-    """Teilt die Sequenz in (n_trainable, fixed_gates).
-
-    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
-    der Rest bleibt fest. Es gilt
-        n_trainable + len(fixed_gates) == len(gate_sequence),
-    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
-    """
-    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
-    fixed_gates = gate_sequence[n_trainable:]
-    return n_trainable, fixed_gates
-
+# Hinweis: qml.grad liefert zusätzlich zum Gradienten den Funktionswert-Pfad
+# der Autograd-Maschinerie — dieser Mehraufwand ist Teil des QNode/qml.grad-
+# Interfaces und damit bewusst Teil des gemessenen Overheads.
 
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
-    params                   = pnp.array(np.zeros(n_trainable), requires_grad=True)
-
-    with qml.tape.QuantumTape() as tape:
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
-            apply_gate(gn, ws, ps)
-        qml.expval(qml.PauliZ(0))
-
-    # Nur nach den trainierbaren RY ableiten. Ein rohes QuantumTape setzt
-    # trainable_params sonst auf ALLE Parameter (inkl. der festen Winkel der
-    # fixed_gates) und ignoriert requires_grad — anders als das QNode-Interface.
-    # Ohne diese Zeile würde die Tape-Linie nach mehr Parametern ableiten als die
-    # QNode-Linien und wäre nicht mit ihnen vergleichbar.
-    tape.trainable_params = list(range(n_trainable))
-
-    grad_tapes, fn = qml.gradients.param_shift(tape)
+    dev    = qml.device("default.qubit", wires=num_qubits)
+    params = pnp.array(np.zeros(num_qubits), requires_grad=True)
 
     def run():
-        results = qml.execute(grad_tapes, dev)
-        return fn(results)
+        with qml.tape.QuantumTape() as tape:      # Bauen — im Messfenster
+            for i in range(num_qubits):
+                qml.RY(params[i], wires=i)
+            for gn, ws, ps in gate_sequence:
+                apply_gate(gn, ws, ps)
+            qml.expval(qml.PauliZ(0))
+        # Nur nach den RY ableiten (rohe Tapes markieren sonst ALLE Winkel
+        # als trainierbar — anders als das QNode-Interface).
+        tape.trainable_params = list(range(num_qubits))
+        grad_tapes, fn = qml.gradients.param_shift(tape)
+        fn(qml.execute(grad_tapes, dev))          # Ausführen + Zusammensetzen
 
     return run
 
 
-def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
+def runner_gradient_qnode(num_qubits: int, gate_sequence: list):
+    dev = qml.device("default.qubit", wires=num_qubits)
 
-    @qml.qnode(dev, cache=False, diff_method="best")
+    @qml.qnode(dev, cache=False, diff_method="parameter-shift")
     def circuit(params):
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
+        for i in range(num_qubits):
+            qml.RY(params[i], wires=i)
+        for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
-
-    def run():
-        grad_fn(params.copy())
-
-    return run
-
-
-def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
-
-    @qml.qnode(dev, cache=True, diff_method="best")
-    def circuit(params):
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
-            apply_gate(gn, ws, ps)
-        return qml.expval(qml.PauliZ(0))
-
-    grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
+    params  = pnp.array(np.zeros(num_qubits), requires_grad=True)
 
     def run():
         grad_fn(params.copy())
@@ -460,44 +351,33 @@ def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
 # Modus → Runner-Liste auflösen
 # =========================================================
 # Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
-# Creation: nc/c messen dasselbe (Cache wirkt nicht aufs Tracing) — beide
-# Linien laufen bewusst mit, um genau das im Plot zu zeigen (s. o.).
-#
-# Vergleich mit dem Executor-Benchmark (Overhead = Executor − Roh):
-# Paar-Partner ist die qnc-Linie. Die qc-Spalten NICHT paarweise vergleichen
-# (Roh-Cache wirkungslos vs. Executor-Ergebnis-Cache-Treffer). Die Tape-Linie
-# ist Kontext ohne Executor-Pendant (im Gradient-Modus zudem Param-Shift statt
-# Backprop). Fairer Tape-vs-QNode-Vergleich: qnode_vs_tape.py.
 
 MODE_RUNNERS = {
     "creation": [
-        ("tape", "Tape",             "tab:blue",   runner_creation_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_creation_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_creation_qnode_c),
+        ("tape",  "Tape",  "tab:blue",   runner_creation_tape),
+        ("qnode", "QNode", "tab:orange", runner_creation_qnode),
     ],
     "execution": [
-        ("tape", "Tape",             "tab:blue",   runner_execution_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_execution_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_execution_qnode_c),
+        ("tape",  "Tape",  "tab:blue",   runner_execution_tape),
+        ("qnode", "QNode", "tab:orange", runner_execution_qnode),
     ],
     "gradient": [
-        ("tape", "Tape",             "tab:blue",   runner_gradient_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_gradient_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_gradient_qnode_c),
+        ("tape",  "Tape",  "tab:blue",   runner_gradient_tape),
+        ("qnode", "QNode", "tab:orange", runner_gradient_qnode),
     ],
 }
 
 MODE_LABELS = {
-    "creation":  "Erstellungszeit",
-    "execution": "Ausführungszeit",
-    "gradient":  "Gradienten-Berechnungszeit",
+    "creation":  "Erstellungszeit (nur bauen)",
+    "execution": "Bauen + Ausführen",
+    "gradient":  "Gradient (Parameter-Shift, bauen + rechnen)",
 }
 
 # "all" → alle Modi in Definitionsreihenfolge, sonst nur der gewählte
 MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MODE]
 
 # =========================================================
-# Timing
+# Timing  (identisch zum Roh-Benchmark)
 # =========================================================
 
 def measure_runtime(func, repeats: int = 5) -> dict:
@@ -516,12 +396,8 @@ def measure_runtime(func, repeats: int = 5) -> dict:
     }
 
 # =========================================================
-# Speicher-Messung (Peak via tracemalloc)
+# Speicher-Messung (Peak via tracemalloc, identisch zum Roh-Benchmark)
 # =========================================================
-# Misst den Peak der Python-Allokationen während func() läuft.
-# Reproduzierbar und erfasst die hier dominante Last (Op-/Tape-Objekte).
-# NumPy-C-Buffer werden bewusst nicht erfasst (bei 10-15 Qubits vernachlässigbar).
-# Getrennt vom Timing, da tracemalloc die Laufzeit verfälschen würde.
 
 def measure_memory(func, repeats: int = 5) -> dict:
     func()      # Warm-up (lazy Imports/Caches nicht mitmessen)
@@ -546,7 +422,7 @@ def measure_memory(func, repeats: int = 5) -> dict:
 
 def run_benchmark(mode: str) -> pd.DataFrame:
     runners  = MODE_RUNNERS[mode]
-    csv_file = RUN_DIR / f"benchmark_{GATE_SET_CHOICE}_{mode}.csv"
+    csv_file = RUN_DIR / f"tape_vs_qnode_{GATE_SET_CHOICE}_{mode}.csv"
 
     results = []
     first_write = True   # Header nur beim allerersten Schreiben
@@ -588,7 +464,7 @@ def run_benchmark(mode: str) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 # =========================================================
-# Plot  (ein Subplot pro Qubit-Zahl, eine Linie pro Abstraktion)
+# Plot  (ein Subplot pro Qubit-Zahl, zwei Linien: Tape vs. QNode)
 # =========================================================
 
 def plot_metric(
@@ -613,7 +489,8 @@ def plot_metric(
     axes = axes[0]
 
     fig.suptitle(
-        f"{title}  |  Gate-Set: {gate_set!r}  ({', '.join(ACTIVE_GATE_SET)})",
+        f"Tape vs. QNode – {title}  |  Gate-Set: {gate_set!r}  "
+        f"({', '.join(ACTIVE_GATE_SET)})",
         fontsize=13, fontweight="bold", y=1.02,
     )
 
@@ -646,6 +523,9 @@ def plot_metric(
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Plot gespeichert: {save_path}")
 
+    if not SHOW_PLOTS:
+        plt.close(fig)
+
 
 # =========================================================
 # Haupt-Ablauf: gewählte Modi nacheinander ausführen
@@ -659,7 +539,7 @@ for mode in MODES_TO_RUN:
     df         = run_benchmark(mode)
     runners    = MODE_RUNNERS[mode]
     mode_label = MODE_LABELS[mode]
-    stub       = f"benchmark_{GATE_SET_CHOICE}_{mode}"
+    stub       = f"tape_vs_qnode_{GATE_SET_CHOICE}_{mode}"
 
     # --- Laufzeit ---
     plot_metric(
@@ -675,4 +555,5 @@ for mode in MODES_TO_RUN:
         save_path=RUN_DIR / f"{stub}_mem.png",
     )
 
-plt.show()
+if SHOW_PLOTS:
+    plt.show()
