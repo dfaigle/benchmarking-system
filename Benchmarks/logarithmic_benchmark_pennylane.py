@@ -292,7 +292,7 @@ def runner_execution_tape(num_qubits: int, gate_sequence: list):
     with qml.tape.QuantumTape() as tape:
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        qml.state()
+        qml.expval(qml.PauliZ(0))
 
     def run():
         qml.execute([tape], dev)
@@ -307,7 +307,7 @@ def runner_execution_qnode_nc(num_qubits: int, gate_sequence: list):
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        return qml.state()
+        return qml.expval(qml.PauliZ(0))
 
     return circuit
 
@@ -319,7 +319,7 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
-        return qml.state()
+        return qml.expval(qml.PauliZ(0))
 
     return circuit
 
