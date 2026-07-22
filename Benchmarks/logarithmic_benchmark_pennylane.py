@@ -22,8 +22,8 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "clifford"               → H, S, CNOT, PauliX/Y/Z
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
-#  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
-#                             ControlledPhaseShift  (ohne Rot/Toffoli —
+#  "non_clifford_comparable"→ RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift  (ohne T/Rot/Toffoli —
 #                             1:1 vergleichbar mit "non_clifford" des
 #                             Executor-Benchmarks, s. Definition unten)
 #  "clifford_t"             → H, T, CNOT
@@ -75,8 +75,13 @@ NON_CLIFFORD_GATES = [
 # (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
 # UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
 # Seed. Bei Änderungen beide Listen synchron halten!
+# Ohne "T" (7 statt 8 Gatter): T ist das einzige Gatter dieses Sets ohne Winkel
+# und kann nie trainierbar werden — in qnode_vs_tape.py, wo die trainierbaren
+# Winkel über den Circuit verstreut liegen statt in einem RY-Block, ließ es die
+# Parameterzahl mit dem Seed schwanken. Hier mitgezogen, damit alle vier
+# Benchmark-Dateien bei gleichem Seed denselben Schaltkreis erzeugen.
 NON_CLIFFORD_COMPARABLE_GATES = [
-    "T", "RX", "RY", "RZ",
+    "RX", "RY", "RZ",
     "CRX", "CRY", "CRZ", "ControlledPhaseShift",
 ]
 
@@ -133,14 +138,14 @@ GATE_CONFIGS = np.unique(
 # a_n = 10 * (100000 / 10)^(n / 19)
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Pennylane/run_<N>/
+# Pro Lauf ein eigener Unterordner: Results/Pennylane/<timestamp>_qubits-<...>/
 # =========================================================
 
-run = 1
-while (RESULT_DIR / f"run_{run}").exists():
-    run += 1
-RUN_DIR = RESULT_DIR / f"run_{run}"
-RUN_DIR.mkdir(parents=True)
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+qubit_string = "-".join(map(str, QUBIT_CONFIGS))
+
+RUN_DIR = RESULT_DIR / f"{timestamp}_qubits-{qubit_string}"
+RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 # CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
@@ -327,18 +332,14 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung.
 #
-#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird
-#   durch trainierbare RY(params[k]) ERSETZT, zyklisch auf die Qubits verteilt
-#   (wires = k % num_qubits). Die restlichen 80% bleiben fester Gate-Block.
+#   Trainierbare Schicht: jedes step-te Gatter (step = round(1/TRAINABLE_RATIO))
+#   wird durch ein trainierbares RY(params[k]) ERSETZT — die trainierbaren
+#   Parameter liegen damit GLEICHMÄSSIG über den gesamten Circuit verstreut
+#   (kein RY-Block am Anfang mehr). Das RY sitzt auf dem Wire des ersetzten
+#   Gatters (ws[0]). Die übrigen Gatter bleiben fest.
 #   Die Gesamt-Gatterzahl bleibt damit total_gates; die Zahl der Ableitungs-
-#   richtungen (Parameter) wächst nun mit total_gates mit.
+#   richtungen (Parameter) wächst mit total_gates mit.
 #   Ausgabe: Erwartungswert ⟨Z₀⟩
-#
-#   HINWEIS (Entartung): Sobald n_trainable > num_qubits, liegen mehrere RY auf
-#   demselben Qubit direkt hintereinander und kollabieren mathematisch zu einem
-#   RY(Summe) — die Parameter sind dann redundant und der Circuit ist über-
-#   parametrisiert. Für die reine ZEITMESSUNG irrelevant, da der Simulator jedes
-#   RY einzeln als Matrixmultiplikation ausführt (kein Auto-Merge).
 #
 # QNode-Linien nutzen diff_method="best" (auf default.qubit → Backprop) —
 # identisch zum Executor der Abstraktionsschicht (pennylane_executor.py,
@@ -373,37 +374,65 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 TRAINABLE_RATIO = 0.3
 
 
-def split_trainable(gate_sequence: list):
-    """Teilt die Sequenz in (n_trainable, fixed_gates).
+def trainable_layout(n_gates: int):
+    """Verteilung der trainierbaren RY über den GANZEN Circuit (kein RY-Block).
 
-    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
-    der Rest bleibt fest. Es gilt
-        n_trainable + len(fixed_gates) == len(gate_sequence),
-    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    Jedes ``step``-te Gatter (step = round(1/TRAINABLE_RATIO)) wird durch ein
+    trainierbares RY ERSETZT; die übrigen Gatter bleiben fest. Die RY liegen
+    damit gleichmäßig über den gesamten Schaltkreis verstreut statt in einem
+    Block am Anfang. n_trainable ist deterministisch (hängt nur von total_gates
+    ab, nicht vom Seed); die Gesamt-Gatterzahl bleibt total_gates.
     """
-    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
-    fixed_gates = gate_sequence[n_trainable:]
-    return n_trainable, fixed_gates
+    step        = max(1, round(1 / TRAINABLE_RATIO))
+    n_trainable = len(range(0, n_gates, step))
+    return n_trainable, step
+
+
+# Rotationsachsen, die an den trainierbaren Positionen zyklisch (über den Zähler
+# k) eingesetzt werden. Alle drei sind 1-Parameter-Gatter → die Zähl-Logik
+# (param_counter += 1, params[k]) und die Tape-Indizes bleiben unverändert
+# korrekt. Auf ein Set beschränken (z. B. ["RY"]) genügt, um nur eine Achse zu
+# nutzen. MUSS mit TRAINABLE_GATES der anderen Benchmarks synchron sein.
+TRAINABLE_GATES = ["RX", "RY", "RZ"]
+
+
+def apply_trainable(k: int, param, wire: int) -> None:
+    gate = TRAINABLE_GATES[k % len(TRAINABLE_GATES)]
+    if   gate == "RX": qml.RX(param, wires=wire)
+    elif gate == "RY": qml.RY(param, wires=wire)
+    else:              qml.RZ(param, wires=wire)
 
 
 def runner_gradient_tape(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
-    params                   = pnp.array(np.zeros(n_trainable), requires_grad=True)
+    dev               = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, step = trainable_layout(len(gate_sequence))
+    params            = pnp.array(np.zeros(n_trainable), requires_grad=True)
 
+    # Tape-Parameter-Indizes der trainierbaren RY werden beim Bauen mitgezählt:
+    # da die RY zwischen festen Winkelgattern verstreut liegen, sind ihre Indizes
+    # NICHT mehr 0..n_trainable-1. param_counter zählt alle bisher ins Tape
+    # eingebrachten Parameter (RY: 1, festes Gatter: len(ps)).
+    trainable_param_idx = []
+    param_counter       = 0
+    k                   = 0
     with qml.tape.QuantumTape() as tape:
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
-            apply_gate(gn, ws, ps)
+        for i, (gn, ws, ps) in enumerate(gate_sequence):
+            if i % step == 0:
+                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
+                trainable_param_idx.append(param_counter)
+                param_counter += 1
+                k += 1
+            else:
+                apply_gate(gn, ws, ps)
+                param_counter += len(ps)
         qml.expval(qml.PauliZ(0))
 
     # Nur nach den trainierbaren RY ableiten. Ein rohes QuantumTape setzt
     # trainable_params sonst auf ALLE Parameter (inkl. der festen Winkel der
-    # fixed_gates) und ignoriert requires_grad — anders als das QNode-Interface.
-    # Ohne diese Zeile würde die Tape-Linie nach mehr Parametern ableiten als die
-    # QNode-Linien und wäre nicht mit ihnen vergleichbar.
-    tape.trainable_params = list(range(n_trainable))
+    # übrigen Gatter) und ignoriert requires_grad — anders als das QNode-
+    # Interface. Ohne diese Zeile würde die Tape-Linie nach mehr Parametern
+    # ableiten als die QNode-Linien und wäre nicht mit ihnen vergleichbar.
+    tape.trainable_params = trainable_param_idx
 
     grad_tapes, fn = qml.gradients.param_shift(tape)
 
@@ -415,15 +444,18 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    dev               = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, step = trainable_layout(len(gate_sequence))
 
     @qml.qnode(dev, cache=False, diff_method="best")
     def circuit(params):
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
-            apply_gate(gn, ws, ps)
+        k = 0
+        for i, (gn, ws, ps) in enumerate(gate_sequence):
+            if i % step == 0:
+                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
+                k += 1
+            else:
+                apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
@@ -436,15 +468,18 @@ def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
 
 
 def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
-    dev                      = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    dev               = qml.device("default.qubit", wires=num_qubits)
+    n_trainable, step = trainable_layout(len(gate_sequence))
 
     @qml.qnode(dev, cache=True, diff_method="best")
     def circuit(params):
-        for k in range(n_trainable):
-            qml.RY(params[k], wires=k % num_qubits)
-        for gn, ws, ps in fixed_gates:
-            apply_gate(gn, ws, ps)
+        k = 0
+        for i, (gn, ws, ps) in enumerate(gate_sequence):
+            if i % step == 0:
+                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
+                k += 1
+            else:
+                apply_gate(gn, ws, ps)
         return qml.expval(qml.PauliZ(0))
 
     grad_fn = qml.grad(circuit)
@@ -500,13 +535,17 @@ MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MOD
 # Timing
 # =========================================================
 
-def measure_runtime(func, repeats: int = 5) -> dict:
-    func()      # Warm-up
+def measure_runtime(runner_factory, repeats: int = 5) -> dict:
+    # Jede Wiederholung bekommt einen eigenen Seed (SEED + r) → ein anderer
+    # Zufalls-Circuit pro Wiederholung. Der Aufbau (runner_factory) läuft
+    # ungemessen, danach ein ungemessener Warm-up-Aufruf, dann der Zeit-Messlauf.
     times = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         t0 = time.perf_counter()
-        func()
+        runner()
         times.append(time.perf_counter() - t0)
     return {
         "avg": float(np.mean(times)),
@@ -523,13 +562,16 @@ def measure_runtime(func, repeats: int = 5) -> dict:
 # NumPy-C-Buffer werden bewusst nicht erfasst (bei 10-15 Qubits vernachlässigbar).
 # Getrennt vom Timing, da tracemalloc die Laufzeit verfälschen würde.
 
-def measure_memory(func, repeats: int = 5) -> dict:
-    func()      # Warm-up (lazy Imports/Caches nicht mitmessen)
+def measure_memory(runner_factory, repeats: int = 5) -> dict:
+    # Wie measure_runtime: eigener Seed (SEED + r) pro Wiederholung, Warm-up
+    # (lazy Imports/Caches nicht mitmessen) ungemessen vor der Peak-Messung.
     peaks = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         tracemalloc.start()
-        func()
+        runner()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         peaks.append(peak / 1024**2)   # MiB
@@ -556,10 +598,6 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
             print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-            gate_sequence = generate_gate_sequence(
-                num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
-            )
-
             row = {
                 "timestamp":      datetime.now().isoformat(),
                 "gate_set":       GATE_SET_CHOICE,
@@ -570,9 +608,17 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
             log_parts = []
             for prefix, _label, _color, builder in runners:
-                runner = builder(num_qubits, gate_sequence)
-                stats  = measure_runtime(runner, REPEATS)
-                mem    = measure_memory(runner, REPEATS)
+                # Fabrik: erzeugt pro Seed eine frische Gatter-Sequenz und den
+                # dazugehörigen Runner. Die Mess-Funktionen rufen sie mit
+                # SEED + r auf → anderer Zufalls-Circuit pro Wiederholung.
+                def make_runner(seed, _builder=builder):
+                    seq = generate_gate_sequence(
+                        num_qubits, total_gates, ACTIVE_GATE_SET, seed=seed
+                    )
+                    return _builder(num_qubits, seq)
+
+                stats = measure_runtime(make_runner, REPEATS)
+                mem   = measure_memory(make_runner, REPEATS)
                 row.update({f"{prefix}_{k}":     v for k, v in stats.items()})
                 row.update({f"{prefix}_mem_{k}": v for k, v in mem.items()})
                 log_parts.append(f"{prefix}={stats['avg']:.5f}s/{mem['avg']:.1f}MiB")

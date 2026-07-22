@@ -10,23 +10,16 @@ gleiche GATE_CONFIGS/QUBIT_CONFIGS, gleiche Mess-Methodik, gleiche CSV-Spalten
 fair vergleichen: der Overhead deiner Abstraktion ergibt sich als spaltenweise
 Differenz  Executor − Roh-Framework  für dieselbe Zelle.
 
-Zwei Linien — sie entsprechen der einen echten Executor-Option ``caching``
-(``Executor.create(backend, caching=...)``):
+Zwei Linien — sie entsprechen genau der einen echten Executor-Option ``caching``
+(``Executor.create(backend, caching=...)``) und sind 1:1 auf die passenden Linien
+des Roh-Benchmarks gemappt:
 
-    qnc  → Executor mit caching=False (Standardfall): rechnet bei jedem Aufruf
-           neu (abstrakter Circuit wird je Aufruf ins native Format übersetzt
-           und simuliert bzw. abgeleitet).
-    qc   → Executor mit caching=True: der Ergebnis-Cache greift nach dem
-           Warm-up, jeder weitere identische Aufruf ist ein Cache-Treffer.
-
-WICHTIG — Overhead-Vergleich (Executor − Roh) NUR über die qnc-Spalten:
-Die qc-Spalten messen bei Roh und Executor fundamental Verschiedenes
-(Roh: PennyLane-Cache vermeidet das Tracing nie, Linie ≈ qnc; Executor:
-Ergebnis-Cache-Treffer ≈ reine Lookup-Zeit). Sie sind einzeln interpretierbar,
-aber NICHT als Differenz. Paar-Partner in den Roh-Benchmarks:
-PennyLane → QNode-qnc-Linie; Qiskit → qc-Linie (Statevector-Pfad).
-Tape- (PennyLane) und est/estt-Linien (Qiskit) sind Kontext ohne
-Executor-Pendant.
+    qnc  (QNode no cache) → Executor mit caching=False (Standardfall): rechnet bei
+                           jedem Aufruf neu (abstrakter Circuit wird je Aufruf
+                           ins native Format übersetzt und simuliert).
+    qc   (QNode cached)   → Executor mit caching=True: der Ergebnis-Cache greift nach
+                           dem Warm-up, jeder weitere identische Aufruf ist ein
+                           Cache-Treffer.
 
 Hinweis Vergleichbarkeit: Identische Gatter-Sequenzen (gleicher Seed) entstehen
 nur, wenn beide Benchmarks eine Gate-Liste GLEICHER Länge und Reihenfolge
@@ -90,13 +83,13 @@ GATE_SET_CHOICE = "non_clifford"
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
 # =========================================================
 #
-#  "creation"  → Abstrakten Circuit aufbauen + ins native Format übersetzen
-#                (transpile_circuit, KEIN Execute) — gleiche Ebene wie
-#                construct_tape (PennyLane) / QuantumCircuit befüllen (Qiskit).
+#  "creation"  → Zeit, aus der Gatter-Sequenz einen lauffähigen Zustand
+#                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
 #  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
-#  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; die ersten TRAINABLE_RATIO der
-#                Gatter sind durch trainierbare RY ersetzt — identisch zum
-#                Roh-Benchmark, Gesamt-Gatterzahl bleibt total_gates).
+#  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; TRAINABLE_RATIO der Gatter sind
+#                durch trainierbare RY ersetzt, verstreut über den ganzen
+#                Circuit — identisch zum Roh-Benchmark, Gesamt-Gatterzahl bleibt
+#                total_gates).
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner.
 #
@@ -148,7 +141,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5, 8, 10, 12, 15]
+QUBIT_CONFIGS = [5,10,15]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -159,14 +152,15 @@ GATE_CONFIGS = np.unique(
 METHODS = ["qnc", "qc"]
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Executor/run_<N>/
+# Pro Lauf ein eigener Unterordner: Results/Executor/<timestamp>_qubits-<...>/
 # =========================================================
 
-run = 1
-while (RESULT_DIR / f"run_{run}").exists():
-    run += 1
-RUN_DIR = RESULT_DIR / f"run_{run}"
-RUN_DIR.mkdir(parents=True)
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+qubit_string = "-".join(map(str, QUBIT_CONFIGS))
+
+RUN_DIR = RESULT_DIR / f"{timestamp}_qubits-{qubit_string}"
+RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 # CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
@@ -238,32 +232,55 @@ def build_abstract(num_qubits: int, sequence: list) -> AbstractQuantumCircuit:
 TRAINABLE_RATIO = 0.3
 
 
-def split_trainable(gate_sequence: list):
-    """Teilt die Sequenz in (n_trainable, fixed_gates) — identisch zum Roh-Benchmark.
+def trainable_layout(n_gates: int):
+    """Verteilung der trainierbaren RY über den GANZEN Circuit (kein RY-Block) —
+    identisch zum Roh-Benchmark.
 
-    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
-    der Rest bleibt fest. Es gilt
-        n_trainable + len(fixed_gates) == len(gate_sequence),
-    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    Jedes ``step``-te Gatter (step = round(1/TRAINABLE_RATIO)) wird durch ein
+    trainierbares RY ERSETZT; die übrigen Gatter bleiben fest. n_trainable ist
+    deterministisch (hängt nur von total_gates ab, nicht vom Seed); die Gesamt-
+    Gatterzahl bleibt total_gates.
     """
-    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
-    fixed_gates = gate_sequence[n_trainable:]
-    return n_trainable, fixed_gates
+    step        = max(1, round(1 / TRAINABLE_RATIO))
+    n_trainable = len(range(0, n_gates, step))
+    return n_trainable, step
+
+
+# Rotationsachsen, die an den trainierbaren Positionen zyklisch (über den Zähler
+# k) eingesetzt werden. Alle drei sind 1-Parameter-Gatter → die Zähl-Logik
+# (theta[k], n_trainable) bleibt unverändert korrekt. Auf ein Set beschränken
+# (z. B. ["RY"]) genügt, um nur eine Achse zu nutzen. MUSS mit TRAINABLE_GATES
+# der anderen Benchmarks synchron sein.
+TRAINABLE_GATES = ["RX", "RY", "RZ"]
+
+
+def apply_trainable(qc: AbstractQuantumCircuit, k: int, param, wire: int) -> None:
+    # Achtung: die Abstraktionsschicht nimmt den Wire ZUERST, dann den Winkel
+    # (qc.rx(wire, angle)) — umgekehrt zu Qiskit/PennyLane.
+    gate = TRAINABLE_GATES[k % len(TRAINABLE_GATES)]
+    if   gate == "RX": qc.rx(wire, param)
+    elif gate == "RY": qc.ry(wire, param)
+    else:              qc.rz(wire, param)
 
 
 def build_abstract_trainable(
-    num_qubits: int, n_trainable: int, fixed_gates: list, theta: ParameterVector
+    num_qubits: int, sequence: list, step: int, theta: ParameterVector
 ) -> AbstractQuantumCircuit:
-    """Trainierbare RY-Schicht + fester Rest-Gate-Block — identisch zum Roh-Benchmark.
+    """Trainierbare Rotationen verstreut über den ganzen Circuit — identisch zum
+    Roh-Benchmark.
 
-    Die RY ersetzen die ersten n_trainable Gatter der Original-Sequenz und werden
-    zyklisch auf die Qubits verteilt (wire = k % num_qubits).
+    Jedes step-te Gatter wird durch eine trainierbare Rotation RX/RY/RZ(theta[k])
+    — zyklisch über k — auf dem Wire des ersetzten Gatters (ws[0]) ersetzt; die
+    übrigen Gatter bleiben fest.
     """
     qc = AbstractQuantumCircuit(num_qubits)
-    for k in range(n_trainable):
-        qc.ry(k % num_qubits, theta[k])
-    for gn, ws, ps in fixed_gates:
-        apply_abstract(qc, gn, ws, ps)
+    k = 0
+    for i, (gn, ws, ps) in enumerate(sequence):
+        if i % step == 0:
+            apply_trainable(qc, k, theta[k], ws[0])   # RX / RY / RZ im Wechsel
+            k += 1
+        else:
+            apply_abstract(qc, gn, ws, ps)
     return qc
 
 # =========================================================
@@ -283,15 +300,11 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
 
     # ------------------------------------------------ creation
     if mode == "creation":
-        # NUR bauen + übersetzen, KEIN Execute: abstrakten Circuit aufbauen und
-        # via transpile_circuit ins native Format bringen. Damit misst creation
-        # dieselbe Ebene wie die Roh-Benchmarks (PennyLane: construct_tape,
-        # Qiskit qc-Linie: QuantumCircuit befüllen — beide ohne Ausführung).
         def r_qnc():
-            ex.transpile_circuit(build_abstract(num_qubits, sequence))
+            ex.statevector(build_abstract(num_qubits, sequence))
 
         def r_qc():
-            ex_cached.transpile_circuit(build_abstract(num_qubits, sequence))
+            ex_cached.statevector(build_abstract(num_qubits, sequence))
 
         return {"qnc": r_qnc, "qc": r_qc}
 
@@ -312,11 +325,11 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
         z0 = "I" * (num_qubits - 1) + "Z"          # ⟨Z₀⟩ (little-endian)
         obs = AbstractQuantumOperator(paulis=[z0], coeffs=[1.0])
 
-        n_trainable, fixed_gates = split_trainable(sequence)
+        n_trainable, step = trainable_layout(len(sequence))
         values = np.zeros(n_trainable).tolist()
 
         theta = ParameterVector("x", n_trainable)
-        qc_abs = build_abstract_trainable(num_qubits, n_trainable, fixed_gates, theta)
+        qc_abs = build_abstract_trainable(num_qubits, sequence, step, theta)
         op = ex.transpile_operator(obs)
 
         def r_qnc():
@@ -345,13 +358,17 @@ MODES_TO_RUN = (
 # Timing  (identisch zum Roh-Benchmark)
 # =========================================================
 
-def measure_runtime(func, repeats: int = 5) -> dict:
-    func()      # Warm-up
+def measure_runtime(runner_factory, repeats: int = 5) -> dict:
+    # Jede Wiederholung bekommt einen eigenen Seed (SEED + r) → ein anderer
+    # Zufalls-Circuit pro Wiederholung. Der Aufbau (runner_factory) läuft
+    # ungemessen, danach ein ungemessener Warm-up-Aufruf, dann der Zeit-Messlauf.
     times = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         t0 = time.perf_counter()
-        func()
+        runner()
         times.append(time.perf_counter() - t0)
     return {
         "avg": float(np.mean(times)),
@@ -364,13 +381,16 @@ def measure_runtime(func, repeats: int = 5) -> dict:
 # Speicher-Messung (Peak via tracemalloc)
 # =========================================================
 
-def measure_memory(func, repeats: int = 5) -> dict:
-    func()      # Warm-up (lazy Imports/Caches nicht mitmessen)
+def measure_memory(runner_factory, repeats: int = 5) -> dict:
+    # Wie measure_runtime: eigener Seed (SEED + r) pro Wiederholung, Warm-up
+    # (lazy Imports/Caches nicht mitmessen) ungemessen vor der Peak-Messung.
     peaks = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         tracemalloc.start()
-        func()
+        runner()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         peaks.append(peak / 1024**2)   # MiB
@@ -396,14 +416,19 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
             print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-            sequence = generate_gate_sequence(
-                num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED
-            )
+            # Fabrik pro Methode: erzeugt für einen Seed eine frische Gatter-
+            # Sequenz und den zugehörigen Runner. Die Mess-Funktionen rufen sie
+            # mit SEED + r auf → anderer Zufalls-Circuit pro Wiederholung.
+            def make_runner_factory(m):
+                def factory(seed):
+                    seq = generate_gate_sequence(
+                        num_qubits, total_gates, ACTIVE_GATE_SET, seed=seed
+                    )
+                    return build_runners(mode, num_qubits, seq)[m]
+                return factory
 
-            runners = build_runners(mode, num_qubits, sequence)
-
-            stats = {m: measure_runtime(runners[m], REPEATS) for m in METHODS}
-            mem   = {m: measure_memory(runners[m], REPEATS) for m in METHODS}
+            stats = {m: measure_runtime(make_runner_factory(m), REPEATS) for m in METHODS}
+            mem   = {m: measure_memory(make_runner_factory(m), REPEATS) for m in METHODS}
 
             print(
                 f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
