@@ -230,15 +230,13 @@ def apply_gate(gate_name: str, wires: list, params: list) -> None:
 # Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
 # Device-Erstellung ist ausgelagert (gleiche Baseline).
 #
-#   Tape:           QuantumTape-Kontext befüllen (kein execute)
-#   QNode no cache: qml.workflow.construct_tape → Tracing + Tape-Aufbau (kein execute)
-#   QNode cached:   identisch, nur mit cache=True
+#   Tape:  QuantumTape-Kontext befüllen (kein execute)
+#   QNode: qml.workflow.construct_tape → Tracing + Tape-Aufbau (kein execute)
 #
-# Beide QNode-Linien sind BEWUSST enthalten, obwohl cache=True/False hier
-# nichts ändern kann: der Cache betrifft nur Ausführungsergebnisse (keyed auf
-# Tape-Hash), nicht das Tracing. Die erwartete Deckung der beiden Linien im
-# Plot zeigt genau das empirisch — und hält die CSV-Spalten (qnc_/qc_) über
-# alle Modi und zum Executor-Benchmark konsistent.
+# Es gibt bewusst nur EINE QNode-Linie (cache=False, s. Kommentar bei den
+# Runner-Listen): der PennyLane-Cache betrifft nur Ausführungsergebnisse
+# (keyed auf Tape-Hash) und kann hier — wo gar nicht ausgeführt wird —
+# ohnehin nichts bewirken.
 
 def runner_creation_tape(num_qubits: int, gate_sequence: list):
     def run():
@@ -250,25 +248,10 @@ def runner_creation_tape(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_creation_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_creation_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
     @qml.qnode(dev, cache=False)
-    def circuit():
-        for gn, ws, ps in gate_sequence:
-            apply_gate(gn, ws, ps)
-        return qml.state()
-
-    def run():
-        qml.workflow.construct_tape(circuit)()   # nur Tracing + Tape-Aufbau
-
-    return run
-
-
-def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
-
-    @qml.qnode(dev, cache=True)
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
@@ -285,10 +268,8 @@ def runner_creation_qnode_c(num_qubits: int, gate_sequence: list):
 # Rückgabe ist qml.state() — exakt dieselbe Aufgabe wie ex.statevector im
 # Executor-Benchmark (vorher qml.probs: andere Aufgabe, unfairer Vergleich).
 #
-#   Tape:           qml.execute([tape], dev) — tape ist vorgebaut
-#   QNode no cache: circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=False)
-#   QNode cached:   circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=True;
-#                   der Cache vermeidet das Tracing NICHT, s. Creation-Kommentar)
+#   Tape:  qml.execute([tape], dev) — tape ist vorgebaut
+#   QNode: circuit()-Aufruf mit Tracing + Simulation bei jedem Aufruf (cache=False)
 
 def runner_execution_tape(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
@@ -305,22 +286,10 @@ def runner_execution_tape(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_execution_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_execution_qnode(num_qubits: int, gate_sequence: list):
     dev = qml.device("default.qubit", wires=num_qubits)
 
     @qml.qnode(dev, cache=False)
-    def circuit():
-        for gn, ws, ps in gate_sequence:
-            apply_gate(gn, ws, ps)
-        return qml.expval(qml.PauliZ(0))
-
-    return circuit
-
-
-def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
-    dev = qml.device("default.qubit", wires=num_qubits)
-
-    @qml.qnode(dev, cache=True)
     def circuit():
         for gn, ws, ps in gate_sequence:
             apply_gate(gn, ws, ps)
@@ -361,12 +330,8 @@ def runner_execution_qnode_c(num_qubits: int, gate_sequence: list):
 # unabhängige Alternative. Die Tape-Linie ist zudem NICHT direkt mit den
 # QNode-Linien (Backprop) vergleichbar.
 #
-#   Tape:           qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
-#   QNode no cache: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
-#   QNode cached:   identisch zu no cache — cache=True cached nur Ausführungs-
-#                   ergebnisse (keyed auf Tape-Hash) und greift bei Backprop nie;
-#                   gemessen ist die Linie durch den Hash-Overhead sogar
-#                   ~10-20 % LANGSAMER, nicht schneller.
+#   Tape:  qml.execute(grad_tapes, dev) — grad_tapes einmalig vorberechnet
+#   QNode: qml.grad(circuit)(params) — Tracing + Simulation bei jedem Aufruf
 
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
@@ -443,7 +408,7 @@ def runner_gradient_tape(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
+def runner_gradient_qnode(num_qubits: int, gate_sequence: list):
     dev               = qml.device("default.qubit", wires=num_qubits)
     n_trainable, step = trainable_layout(len(gate_sequence))
 
@@ -467,58 +432,36 @@ def runner_gradient_qnode_nc(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_gradient_qnode_c(num_qubits: int, gate_sequence: list):
-    dev               = qml.device("default.qubit", wires=num_qubits)
-    n_trainable, step = trainable_layout(len(gate_sequence))
-
-    @qml.qnode(dev, cache=True, diff_method="best")
-    def circuit(params):
-        k = 0
-        for i, (gn, ws, ps) in enumerate(gate_sequence):
-            if i % step == 0:
-                apply_trainable(k, params[k], ws[0])   # RX / RY / RZ im Wechsel
-                k += 1
-            else:
-                apply_gate(gn, ws, ps)
-        return qml.expval(qml.PauliZ(0))
-
-    grad_fn = qml.grad(circuit)
-    params  = pnp.array(np.zeros(n_trainable), requires_grad=True)
-
-    def run():
-        grad_fn(params.copy())
-
-    return run
-
-
 # =========================================================
 # Modus → Runner-Liste auflösen
 # =========================================================
 # Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
-# Creation: nc/c messen dasselbe (Cache wirkt nicht aufs Tracing) — beide
-# Linien laufen bewusst mit, um genau das im Plot zu zeigen (s. o.).
 #
-# Vergleich mit dem Executor-Benchmark (Overhead = Executor − Roh):
-# Paar-Partner ist die qnc-Linie. Die qc-Spalten NICHT paarweise vergleichen
-# (Roh-Cache wirkungslos vs. Executor-Ergebnis-Cache-Treffer). Die Tape-Linie
-# ist Kontext ohne Executor-Pendant (im Gradient-Modus zudem Param-Shift statt
-# Backprop). Fairer Tape-vs-QNode-Vergleich: qnode_vs_tape.py.
+# KEINE cached-QNode-Linie mehr (überall cache=False): Der PennyLane-Cache
+# betrifft nur Ausführungsergebnisse (keyed auf Tape-Hash), vermeidet nie das
+# Tracing und greift bei Backprop ohnehin nicht — gemessen war die Linie durch
+# den Hash-Overhead sogar ~10-20 % LANGSAMER statt schneller. Sie hatte damit
+# keinen Informationswert und ist hier entfernt.
+#
+# Der CSV-Präfix der QNode-Linie bleibt bewusst "qnc" (no cache): So bleiben
+# die Spaltennamen zu den älteren Läufen und zum Executor-Benchmark
+# (logarithmic_benchmark_abstraction.py) identisch — dort ist qnc ebenfalls die
+# uncached Linie und damit der Paar-Partner für Overhead = Executor − Roh.
+# Die Tape-Linie ist Kontext ohne Executor-Pendant (im Gradient-Modus zudem
+# Param-Shift statt Backprop). Fairer Tape-vs-QNode-Vergleich: qnode_vs_tape.py.
 
 MODE_RUNNERS = {
     "creation": [
-        ("tape", "Tape",             "tab:blue",   runner_creation_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_creation_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_creation_qnode_c),
+        ("tape", "Tape",  "tab:blue",   runner_creation_tape),
+        ("qnc",  "QNode", "tab:orange", runner_creation_qnode),
     ],
     "execution": [
-        ("tape", "Tape",             "tab:blue",   runner_execution_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_execution_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_execution_qnode_c),
+        ("tape", "Tape",  "tab:blue",   runner_execution_tape),
+        ("qnc",  "QNode", "tab:orange", runner_execution_qnode),
     ],
     "gradient": [
-        ("tape", "Tape",             "tab:blue",   runner_gradient_tape),
-        ("qnc",  "QNode (no cache)", "tab:orange", runner_gradient_qnode_nc),
-        ("qc",   "QNode (cached)",   "tab:green",  runner_gradient_qnode_c),
+        ("tape", "Tape",  "tab:blue",   runner_gradient_tape),
+        ("qnc",  "QNode", "tab:orange", runner_gradient_qnode),
     ],
 }
 
