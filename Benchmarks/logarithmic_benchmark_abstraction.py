@@ -5,21 +5,22 @@ dieselbe Arbeit (creation / execution / gradient) über den ``Executor`` — ein
 mit dem PennyLane-, einmal mit dem Qiskit-Backend (``BACKEND_CHOICE``).
 
 Der Aufbau ist bewusst IDENTISCH zum Roh-Framework-Benchmark (gleiche Gate-Sets,
-gleiche GATE_CONFIGS/QUBIT_CONFIGS, gleiche Mess-Methodik, gleiche CSV-Spalten
-``qnc_/qc_``, gleiches Plot-Layout). Dadurch lassen sich die beiden Benchmarks
+gleiche GATE_CONFIGS/QUBIT_CONFIGS, gleiche Mess-Methodik, gleiche CSV-Spalte
+``qnc_``, gleiches Plot-Layout). Dadurch lassen sich die beiden Benchmarks
 fair vergleichen: der Overhead deiner Abstraktion ergibt sich als spaltenweise
 Differenz  Executor − Roh-Framework  für dieselbe Zelle.
 
-Zwei Linien — sie entsprechen genau der einen echten Executor-Option ``caching``
-(``Executor.create(backend, caching=...)``) und sind 1:1 auf die passenden Linien
-des Roh-Benchmarks gemappt:
+Eine Linie, gemessen wird der Standardfall des Executors:
 
-    qnc  (QNode no cache) → Executor mit caching=False (Standardfall): rechnet bei
-                           jedem Aufruf neu (abstrakter Circuit wird je Aufruf
-                           ins native Format übersetzt und simuliert).
-    qc   (QNode cached)   → Executor mit caching=True: der Ergebnis-Cache greift nach
-                           dem Warm-up, jeder weitere identische Aufruf ist ein
-                           Cache-Treffer.
+    qnc  (no cache) → Executor mit caching=False (Standardfall): rechnet bei
+                      jedem Aufruf neu (abstrakter Circuit wird je Aufruf ins
+                      native Format übersetzt und simuliert).
+
+Die frühere cached-Linie (``qc``, ``caching=True``) ist entfernt: sie misst nach
+dem Warm-up nur noch Cache-Treffer, also den Lookup statt der eigentlichen
+Arbeit, und hat im Roh-Benchmark keinen sinnvollen Paar-Partner (der PennyLane-
+Cache greift dort nicht). Der Spalten-Präfix ``qnc`` bleibt erhalten, damit alte
+CSVs und die Vergleichs-Skripte weiter passen.
 
 Hinweis Vergleichbarkeit: Identische Gatter-Sequenzen (gleicher Seed) entstehen
 nur, wenn beide Benchmarks eine Gate-Liste GLEICHER Länge und Reihenfolge
@@ -85,7 +86,7 @@ GATE_SET_CHOICE = "non_clifford"
 #
 #  "creation"  → Zeit, aus der Gatter-Sequenz einen lauffähigen Zustand
 #                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
-#  "execution" → Reine Ausführungszeit (statevector) nach dem Aufbau.
+#  "execution" → Reine Ausführungszeit des Erwartungswerts ⟨Z₀⟩ nach dem Aufbau.
 #  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; TRAINABLE_RATIO der Gatter sind
 #                durch trainierbare RY ersetzt, verstreut über den ganzen
 #                Circuit — identisch zum Roh-Benchmark, Gesamt-Gatterzahl bleibt
@@ -141,15 +142,15 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5,10,15]
+QUBIT_CONFIGS = [5,10,]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
 
-#: Präfixe der zwei Linien — identisch zum Roh-Benchmark, damit die CSVs
-#: spaltenweise vergleichbar sind (caching=False vs caching=True).
-METHODS = ["qnc", "qc"]
+#: Präfix der gemessenen Linie — identisch zum Roh-Benchmark, damit die CSVs
+#: spaltenweise vergleichbar sind (beidseitig ohne Ergebnis-Cache).
+METHODS = ["qnc"]
 
 # =========================================================
 # Pro Lauf ein eigener Unterordner: Results/Executor/<timestamp>_qubits-<...>/
@@ -288,37 +289,36 @@ def build_abstract_trainable(
 # =========================================================
 # Liefert ein dict {methoden_key: run_callable}. Der Aufbau von Executor und
 # (abstraktem) Circuit passiert HIER (Setup, nicht gemessen); nur ``run()`` wird
-# getimt. Beide Linien bekommen exakt dieselbe (abstrakte) Eingabe — der EINZIGE
-# Unterschied ist die Executor-Option caching:
+# getimt.
 #
-#   qnc → caching=False (Standardfall): rechnet bei jedem Aufruf neu
-#   qc  → caching=True : Cache-Treffer nach dem Warm-up
+#   qnc → Executor mit caching=False (Standardfall): rechnet bei jedem Aufruf neu
 
 def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
-    ex = Executor.create(BACKEND_CHOICE)                     # ohne Ergebnis-Cache
-    ex_cached = Executor.create(BACKEND_CHOICE, caching=True)
+    ex = Executor.create(BACKEND_CHOICE)   # ohne Ergebnis-Cache (Standardfall)
 
     # ------------------------------------------------ creation
     if mode == "creation":
         def r_qnc():
             ex.statevector(build_abstract(num_qubits, sequence))
 
-        def r_qc():
-            ex_cached.statevector(build_abstract(num_qubits, sequence))
+        return {"qnc": r_qnc}
 
-        return {"qnc": r_qnc, "qc": r_qc}
-
-    # ------------------------------------------------ execution
+    # ------------------------------------------------ execution: ⟨Z₀⟩
+    # Erwartungswert ⟨Z₀⟩ statt voller Statevector — dieselbe Aufgabe wie
+    # qml.expval(qml.PauliZ(0)) im Roh-Benchmark, damit beide fair vergleichbar
+    # sind. Circuit und Observable werden HIER (Setup, nicht gemessen) gebaut
+    # bzw. transpiliert; nur der Erwartungswert-Aufruf liegt im Messfenster.
     if mode == "execution":
+        z0 = "I" * (num_qubits - 1) + "Z"          # ⟨Z₀⟩ (little-endian)
+        obs = AbstractQuantumOperator(paulis=[z0], coeffs=[1.0])
+
         qc_abs = build_abstract(num_qubits, sequence)
+        op = ex.transpile_operator(obs)
 
         def r_qnc():
-            ex.statevector(qc_abs)
+            ex.expectation_value(qc_abs, op)
 
-        def r_qc():
-            ex_cached.statevector(qc_abs)
-
-        return {"qnc": r_qnc, "qc": r_qc}
+        return {"qnc": r_qnc}
 
     # ------------------------------------------------ gradient
     if mode == "gradient":
@@ -335,10 +335,7 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
         def r_qnc():
             ex.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
 
-        def r_qc():
-            ex_cached.expectation_value_derivatives(qc_abs, op, "x", **{"x": values})
-
-        return {"qnc": r_qnc, "qc": r_qc}
+        return {"qnc": r_qnc}
 
     raise ValueError(f"Unbekannter Modus '{mode}'.")
 
@@ -410,7 +407,7 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
     results = []
     first_write = True   # Header nur beim allerersten Schreiben
-
+    #tauschen
     for num_qubits in QUBIT_CONFIGS:
         for total_gates in GATE_CONFIGS:
 
@@ -431,7 +428,9 @@ def run_benchmark(mode: str) -> pd.DataFrame:
             mem   = {m: measure_memory(make_runner_factory(m), REPEATS) for m in METHODS}
 
             print(
-                f"  qnc={stats['qnc']['avg']:.5f}s  qc={stats['qc']['avg']:.5f}s"
+                "  " + "  ".join(
+                    f"{m}={stats[m]['avg']:.5f}s/{mem[m]['avg']:.1f}MiB" for m in METHODS
+                )
             )
 
             row = {
@@ -455,7 +454,7 @@ def run_benchmark(mode: str) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 # =========================================================
-# Plot  (2 Linien: caching=False vs caching=True; Layout wie Roh-Benchmark)
+# Plot  (eine Linie: Executor ohne Ergebnis-Cache; Layout wie Roh-Benchmark)
 # =========================================================
 
 def plot_metric(
@@ -470,8 +469,7 @@ def plot_metric(
     gate_set   = df["gate_set"].iloc[0]
 
     method_cfg = [
-        ("Executor (no cache)", "qnc", "tab:orange"),
-        ("Executor (cached)",   "qc",  "tab:green"),
+        ("Executor", "qnc", "tab:orange"),
     ]
 
     n_qubits = len(qubit_vals)
