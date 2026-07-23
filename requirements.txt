@@ -1,5 +1,7 @@
-pennylane
 numpy
+qiskit
+pennylane
 pandas
 matplotlib
-qiskit
+
+qc_executor @ git+https://github.com/flaqship/executor.git@d4bed30d2f059e3e29a42a4451ddc5eebbfebd08
