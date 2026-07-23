@@ -1,10 +1,22 @@
 """
 Qiskit Benchmarking – analog zu benchmarkLog_V4.py (PennyLane)
 
-Abstraktionsebenen:
-  qc   → QuantumCircuit + Statevector        (roh, kein Primitiv)
-  est  → QuantumCircuit + StatevectorEstimator  (Primitiv, kein Transpile)
-  estt → transpile(circuit) + StatevectorEstimator (Primitiv + Kompilierung)
+Eine Linie (CSV-Präfix ``qc``):
+  creation  → QuantumCircuit befüllen                    (kein Primitiv nötig)
+  execution → StatevectorEstimator.run(circuit, ⟨Z₀⟩)
+  gradient  → Parameter-Shift, ausgewertet über StatevectorEstimator
+
+Warum execution/gradient über das Estimator-Primitiv laufen (und NICHT über
+Statevector direkt): Der Executor der Abstraktionsschicht nutzt für Qiskit
+intern OpTree + Qiskit-Estimator (s. QiskitExecutor._expectation_value bzw.
+_expectation_value_derivatives — letzteres bricht ohne Estimator sogar mit
+RuntimeError ab). Läge hier der rohe Statevector-Pfad, enthielte die Differenz
+"Executor − Roh" zusätzlich Qiskits EIGENEN Primitiv-Overhead statt nur den
+der Abstraktionsschicht — gemessen ~50 % des ausgewiesenen Overheads bei
+kleinen und ~20 % bei großen Schaltkreisen.
+Der Estimator ist zudem Qiskits idiomatisches Gegenstück zu PennyLanes QNode
+(beide: Circuit + Observable → Erwartungswert). Damit sind Roh- und Executor-
+Benchmark in BEIDEN Frameworks auf derselben Abstraktionsebene gepaart.
 """
 
 import numpy as np
@@ -18,8 +30,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from qiskit import QuantumCircuit, transpile
-from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator
 from qiskit.circuit import ParameterVector
 
@@ -57,22 +69,16 @@ GATE_SET_CHOICE = "non_clifford_comparable"
 #
 #  "creation"  → Zeit um den Circuit aufzubauen
 #                  qc:   QuantumCircuit aufbauen (kein Ausführen)
-#                  est:  QuantumCircuit + erster Estimator-Run (Setup-Overhead)
-#                  estt: QuantumCircuit + transpile + erster Estimator-Run
 #
 #  "execution" → Zeit der reinen Simulation nach dem Aufbau
-#                  qc:   Statevector(circuit) — reiner Zustandsvektor OHNE
-#                        Observable (Gegenstück zu ex.statevector)
-#                  est:  StatevectorEstimator.run() – circuit vorgebaut
-#                  estt: StatevectorEstimator.run() – circuit vortranspiliert
+#                  qc:   Statevector(circuit).expectation_value(⟨Z₀⟩) —
+#                        Erwartungswert wie qml.expval(qml.PauliZ(0))
 #
 #  "gradient"  → Zeit der Gradienten-Berechnung via Parameter-Shift
 #                  Trainierbare Schicht: TRAINABLE_RATIO der Gatter durch RY
 #                  ersetzt (identisch zu PennyLane-/Executor-Benchmark)
 #                  Ausgabe: ⟨Z₀⟩-Gradient für alle θₖ
 #                  qc:   Statevector + manueller Param-Shift
-#                  est:  StatevectorEstimator + manueller Param-Shift
-#                  estt: StatevectorEstimator + Param-Shift (vorkompiliert)
 #
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
@@ -234,11 +240,9 @@ def apply_gate(qc: QuantumCircuit, gate_name: str, wires: list, params: list) ->
 # =========================================================
 
 # ------ CREATION ------
-# Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
+# Misst: wie lange braucht die rohe Ebene, um den Circuit aufzubauen?
 #
 #   qc:   QuantumCircuit befüllen (kein execute)
-#   est:  QuantumCircuit + erster Estimator-Run (Tracing + Setup)
-#   estt: QuantumCircuit + transpile + erster Estimator-Run
 
 def runner_creation_qc(num_qubits: int, gate_sequence: list):
     def run():
@@ -248,54 +252,17 @@ def runner_creation_qc(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_creation_est(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-
-    def run():
-        qc = QuantumCircuit(num_qubits)
-        for gn, ws, ps in gate_sequence:
-            apply_gate(qc, gn, ws, ps)
-        estimator.run([(qc, observable)]).result()
-
-    return run
-
-
-def runner_creation_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-
-    def run():
-        qc = QuantumCircuit(num_qubits)
-        for gn, ws, ps in gate_sequence:
-            apply_gate(qc, gn, ws, ps)
-        tc = transpile(qc, optimization_level=1)
-        estimator.run([(tc, observable)]).result()
-
-    return run
-
-
 # ------ EXECUTION ------
 # Misst: wie lange dauert die Simulation nach dem Aufbau?
-# Circuit und (wo nötig) transpilierter Circuit sind vorgebaut.
 #
-#   qc:   Statevector(circuit) — reiner Zustandsvektor OHNE Observable,
-#         damit 1:1 vergleichbar mit ex.statevector des Executor-Benchmarks
-#   est:  StatevectorEstimator.run() – circuit vorgebaut (mit Observable ⟨Z₀⟩)
-#   estt: StatevectorEstimator.run() – circuit vortranspiliert
+#   qc:   StatevectorEstimator.run([(circuit, ⟨Z₀⟩)]) — Erwartungswert über
+#         dasselbe Primitiv, das der Executor intern nutzt (s. Modul-Docstring).
+#         Gleiche Aufgabe wie qml.expval(qml.PauliZ(0)) im PennyLane-Roh- und
+#         ex.expectation_value im Executor-Benchmark.
+#         Circuit, Observable und Estimator im Setup gebaut (ungemessen), nur
+#         der Auswertungs-Aufruf liegt im Messfenster.
 
 def runner_execution_qc(num_qubits: int, gate_sequence: list):
-    qc = QuantumCircuit(num_qubits)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
-
-    def run():
-        Statevector(qc)
-
-    return run
-
-
-def runner_execution_est(num_qubits: int, gate_sequence: list):
     observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
     estimator  = StatevectorEstimator()
     qc = QuantumCircuit(num_qubits)
@@ -304,20 +271,6 @@ def runner_execution_est(num_qubits: int, gate_sequence: list):
 
     def run():
         estimator.run([(qc, observable)]).result()
-
-    return run
-
-
-def runner_execution_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-    qc = QuantumCircuit(num_qubits)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
-    tc = transpile(qc, optimization_level=1)
-
-    def run():
-        estimator.run([(tc, observable)]).result()
 
     return run
 
@@ -341,9 +294,9 @@ def runner_execution_estt(num_qubits: int, gate_sequence: list):
 # teuer — das gilt für Roh- UND Executor-Benchmark gleichermaßen und ist
 # daher fair, aber laufzeitintensiv.
 #
-#   qc:   Statevector + manueller Param-Shift (assign_parameters per Shift)
-#   est:  StatevectorEstimator + Param-Shift (Parameter-Binding im Primitiv)
-#   estt: StatevectorEstimator + Param-Shift (vorkompilierter Circuit)
+#   qc:   manueller Param-Shift, jede Auswertung über StatevectorEstimator
+#         (Parameter-Binding im Primitiv) — dieselbe Ebene wie der Executor,
+#         der intern ebenfalls Estimator-basierten Param-Shift rechnet.
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
 # MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py und
@@ -400,26 +353,14 @@ def _build_trainable_circuit(num_qubits: int, gate_sequence: list):
 
 def runner_gradient_qc(num_qubits: int, gate_sequence: list):
     observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    qc, pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
-    param_values = np.zeros(n_trainable)
-
-    def run():
-        for i in range(n_trainable):
-            plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
-            minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
-            ev_p = Statevector(qc.assign_parameters(dict(zip(pv, plus_vals)))).expectation_value(observable).real
-            ev_m = Statevector(qc.assign_parameters(dict(zip(pv, minus_vals)))).expectation_value(observable).real
-            _ = (ev_p - ev_m) / 2
-
-    return run
-
-
-def runner_gradient_est(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
     estimator  = StatevectorEstimator()
     qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
     param_values = np.zeros(n_trainable)
 
+    # Die Parameter werden IM Primitiv gebunden (dritter Eintrag des PUB) statt
+    # vorher per assign_parameters — genauso macht es der Executor. Bewusst
+    # NICHT gebatcht (alle Shifts in einem run()-Aufruf): der Executor wertet
+    # ebenfalls sequenziell aus, und gemessen bringt Batching hier nur ~6 %.
     def run():
         for i in range(n_trainable):
             plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
@@ -430,50 +371,31 @@ def runner_gradient_est(num_qubits: int, gate_sequence: list):
 
     return run
 
-
-def runner_gradient_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-    qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
-    tc           = transpile(qc, optimization_level=1)
-    param_values = np.zeros(n_trainable)
-
-    def run():
-        for i in range(n_trainable):
-            plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
-            minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
-            ev_p = float(estimator.run([(tc, observable, plus_vals)]).result()[0].data.evs)
-            ev_m = float(estimator.run([(tc, observable, minus_vals)]).result()[0].data.evs)
-            _ = (ev_p - ev_m) / 2
-
-    return run
-
 # =========================================================
 # Modus → Runner-Liste auflösen
 # =========================================================
 # Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
 #
-# Vergleich mit dem Executor-Benchmark (BACKEND_CHOICE="qiskit"): Paar-Partner
-# ist die qc-Linie (Statevector-Pfad — der Executor nutzt intern Statevector
-# bzw. OpTree-Param-Shift über einen Estimator). est/estt sind Kontext-Linien
-# ohne Executor-Pendant; die Cache-Spalte (qc) des Executor-Benchmarks nicht
-# paarweise vergleichen (Ergebnis-Cache-Treffer, s. Docstring dort).
+# Eine Linie. Sie ist der Paar-Partner zum Executor-Benchmark
+# (BACKEND_CHOICE="qiskit"): creation baut nur den Circuit (Executor:
+# transpile_circuit, ebenfalls ohne Ausführung), execution und gradient laufen
+# über dasselbe Estimator-Primitiv, das der Executor intern nutzt. Damit misst
+# "Executor − Roh" in allen drei Modi ausschließlich die Abstraktionsschicht.
+# Die frühere estt-Linie (vortranspiliert) ist entfernt: der Executor
+# transpiliert bei lokalem Backend nicht (s. _convert_to_optree).
+#
+# Der CSV-Präfix bleibt "qc" — kompatibel zu bestehenden Läufen und zur
+# Framework-Erkennung in plot_from_csv.py.
 
 MODE_RUNNERS = {
     "creation": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_creation_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_creation_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_creation_estt),
+        ("qc", "Qiskit (QuantumCircuit)", "tab:blue", runner_creation_qc),
     ],
     "execution": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_execution_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_execution_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_execution_estt),
+        ("qc", "Qiskit (Estimator)", "tab:blue", runner_execution_qc),
     ],
     "gradient": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_gradient_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_gradient_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_gradient_estt),
+        ("qc", "Qiskit (Estimator)", "tab:blue", runner_gradient_qc),
     ],
 }
 
