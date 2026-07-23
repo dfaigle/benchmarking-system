@@ -71,18 +71,22 @@ BACKEND_CHOICE = "pennylane"
 #
 #  "clifford"               → h, s, cx, x, y, z
 #  "non_clifford"           → rx, ry, rz, crx, cry, crz, cp   (7 Gatter, ohne t)
+#  "clifford_plus_non_clifford"
+#                           → beide obigen kombiniert (13 Gatter): h, s, cx,
+#                             x, y, z, rx, ry, rz, crx, cry, crz, cp
 #  "clifford_t"             → h, t, cx
 #  "single_qubit_plus_cnot" → rx, ry, rz, cx
 #
 # Vergleichbarkeit mit dem Roh-Benchmark (identische Sequenz bei gleichem Seed):
 #   "clifford", "clifford_t", "single_qubit_plus_cnot" → gleicher Name dort
+#   "clifford_plus_non_clifford"                       → gleicher Name dort
 #   "non_clifford"                                     → dort "non_clifford_comparable"
 #                                                        wählen (ebenfalls 7 Gatter,
 #                                                        gleiche Reihenfolge)!
 # Das Roh-Set "non_clifford" (10 Gatter, mit Rot/Toffoli) erzeugt eine ANDERE
 # Sequenz und ist NICHT vergleichbar.
 #
-GATE_SET_CHOICE = "non_clifford"
+GATE_SET_CHOICE = "clifford_plus_non_clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -126,6 +130,19 @@ GATE_SETS = {
     "single_qubit_plus_cnot": ["rx", "ry", "rz", "cx"],
 }
 
+# Clifford + non-Clifford in EINEM Set (13 Gatter). Reihenfolge: erst Clifford,
+# dann non-Clifford — MUSS mit CLIFFORD_PLUS_NON_CLIFFORD_GATES der Roh-
+# Benchmarks identisch sein, da rng.choice Indizes über die Liste zieht.
+# Der kritische Fall ist cx/CNOT: beide Generatoren ziehen dafür KEINEN Winkel
+# (hier: cx liegt in _TWO_Q_0, nicht in _ANGLE_2), sonst würde der Zufallsstrom
+# gegenüber dem Roh-Benchmark auseinanderlaufen.
+# Hinweis: ~46 % der Gatter sind damit winkelfrei (vorher 0 %). n_trainable
+# bleibt trotzdem seed-unabhängig, da trainable_layout nur von total_gates
+# abhängt und apply_trainable das Gatter unabhängig von seinem Typ ersetzt.
+GATE_SETS["clifford_plus_non_clifford"] = (
+    GATE_SETS["clifford"] + GATE_SETS["non_clifford"]
+)
+
 VALID_MODES = {"creation", "execution", "gradient", "all"}
 VALID_BACKENDS = {"pennylane", "qiskit"}
 
@@ -151,7 +168,9 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration  (identisch zum Roh-Benchmark)
 # =========================================================
 
-RESULT_DIR = Path(__file__).parent.parent / "Results" / "Executor"
+# Datei liegt in Benchmarks/abstract/ → drei Ebenen hoch zur Projekt-Wurzel.
+# (parent = abstract/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
+RESULT_DIR = Path(__file__).parent.parent.parent / "Results" / "Executor"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
@@ -160,7 +179,7 @@ REPEATS = 4
 QUBIT_CONFIGS = [5]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(1000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
 )
 
 #: Präfix der gemessenen Linie — identisch zum Roh-Benchmark, damit die CSVs

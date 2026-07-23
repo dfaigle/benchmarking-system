@@ -1,10 +1,22 @@
 """
 Qiskit Benchmarking – analog zu benchmarkLog_V4.py (PennyLane)
 
-Abstraktionsebenen:
-  qc   → QuantumCircuit + Statevector        (roh, kein Primitiv)
-  est  → QuantumCircuit + StatevectorEstimator  (Primitiv, kein Transpile)
-  estt → transpile(circuit) + StatevectorEstimator (Primitiv + Kompilierung)
+Eine Linie (CSV-Präfix ``qc``):
+  creation  → QuantumCircuit befüllen                    (kein Primitiv nötig)
+  execution → StatevectorEstimator.run(circuit, ⟨Z₀⟩)
+  gradient  → Parameter-Shift, ausgewertet über StatevectorEstimator
+
+Warum execution/gradient über das Estimator-Primitiv laufen (und NICHT über
+Statevector direkt): Der Executor der Abstraktionsschicht nutzt für Qiskit
+intern OpTree + Qiskit-Estimator (s. QiskitExecutor._expectation_value bzw.
+_expectation_value_derivatives — letzteres bricht ohne Estimator sogar mit
+RuntimeError ab). Läge hier der rohe Statevector-Pfad, enthielte die Differenz
+"Executor − Roh" zusätzlich Qiskits EIGENEN Primitiv-Overhead statt nur den
+der Abstraktionsschicht — gemessen ~50 % des ausgewiesenen Overheads bei
+kleinen und ~20 % bei großen Schaltkreisen.
+Der Estimator ist zudem Qiskits idiomatisches Gegenstück zu PennyLanes QNode
+(beide: Circuit + Observable → Erwartungswert). Damit sind Roh- und Executor-
+Benchmark in BEIDEN Frameworks auf derselben Abstraktionsebene gepaart.
 """
 
 import numpy as np
@@ -18,8 +30,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from qiskit import QuantumCircuit, transpile
-from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator
 from qiskit.circuit import ParameterVector
 
@@ -34,8 +46,8 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "clifford"               → H, S, CNOT, PauliX/Y/Z
 #  "non_clifford"           → T, RX, RY, RZ, Rot, CRX, CRY, CRZ,
 #                             ControlledPhaseShift, Toffoli
-#  "non_clifford_comparable"→ T, RX, RY, RZ, CRX, CRY, CRZ,
-#                             ControlledPhaseShift  (ohne Rot/Toffoli —
+#  "non_clifford_comparable"→ RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift  (ohne T/Rot/Toffoli —
 #                             1:1 vergleichbar mit "non_clifford" des
 #                             Executor-Benchmarks, s. Definition unten)
 #  "clifford_t"             → H, T, CNOT
@@ -57,22 +69,16 @@ GATE_SET_CHOICE = "non_clifford_comparable"
 #
 #  "creation"  → Zeit um den Circuit aufzubauen
 #                  qc:   QuantumCircuit aufbauen (kein Ausführen)
-#                  est:  QuantumCircuit + erster Estimator-Run (Setup-Overhead)
-#                  estt: QuantumCircuit + transpile + erster Estimator-Run
 #
 #  "execution" → Zeit der reinen Simulation nach dem Aufbau
-#                  qc:   Statevector(circuit) — reiner Zustandsvektor OHNE
-#                        Observable (Gegenstück zu ex.statevector)
-#                  est:  StatevectorEstimator.run() – circuit vorgebaut
-#                  estt: StatevectorEstimator.run() – circuit vortranspiliert
+#                  qc:   Statevector(circuit).expectation_value(⟨Z₀⟩) —
+#                        Erwartungswert wie qml.expval(qml.PauliZ(0))
 #
 #  "gradient"  → Zeit der Gradienten-Berechnung via Parameter-Shift
 #                  Trainierbare Schicht: TRAINABLE_RATIO der Gatter durch RY
 #                  ersetzt (identisch zu PennyLane-/Executor-Benchmark)
 #                  Ausgabe: ⟨Z₀⟩-Gradient für alle θₖ
 #                  qc:   Statevector + manueller Param-Shift
-#                  est:  StatevectorEstimator + manueller Param-Shift
-#                  estt: StatevectorEstimator + Param-Shift (vorkompiliert)
 #
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
@@ -94,8 +100,13 @@ NON_CLIFFORD_GATES = [
 # (["t","rx","ry","rz","crx","cry","crz","cp"]). Gleiche Länge + Reihenfolge
 # UND pro Gattertyp gleich viele RNG-Aufrufe → identische Sequenz bei gleichem
 # Seed. Bei Änderungen beide Listen synchron halten!
+# Ohne "T" (7 statt 8 Gatter): T ist das einzige Gatter dieses Sets ohne Winkel
+# und kann nie trainierbar werden — in qnode_vs_tape.py, wo die trainierbaren
+# Winkel über den Circuit verstreut liegen statt in einem RY-Block, ließ es die
+# Parameterzahl mit dem Seed schwanken. Hier mitgezogen, damit alle vier
+# Benchmark-Dateien bei gleichem Seed denselben Schaltkreis erzeugen.
 NON_CLIFFORD_COMPARABLE_GATES = [
-    "T", "RX", "RY", "RZ",
+    "RX", "RY", "RZ",
     "CRX", "CRY", "CRZ", "ControlledPhaseShift",
 ]
 
@@ -144,14 +155,15 @@ GATE_CONFIGS = np.unique(
 )
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Qiskit/run_<N>/
+# Pro Lauf ein eigener Unterordner: Results/Qiskit/<timestamp>_qubits-<...>/
 # =========================================================
 
-run = 1
-while (RESULT_DIR / f"run_{run}").exists():
-    run += 1
-RUN_DIR = RESULT_DIR / f"run_{run}"
-RUN_DIR.mkdir(parents=True)
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+qubit_string = "-".join(map(str, QUBIT_CONFIGS))
+
+RUN_DIR = RESULT_DIR / f"{timestamp}_qubits-{qubit_string}"
+RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 # CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
 
@@ -228,11 +240,9 @@ def apply_gate(qc: QuantumCircuit, gate_name: str, wires: list, params: list) ->
 # =========================================================
 
 # ------ CREATION ------
-# Misst: wie lange braucht jede Abstraktion, um den Circuit aufzubauen?
+# Misst: wie lange braucht die rohe Ebene, um den Circuit aufzubauen?
 #
 #   qc:   QuantumCircuit befüllen (kein execute)
-#   est:  QuantumCircuit + erster Estimator-Run (Tracing + Setup)
-#   estt: QuantumCircuit + transpile + erster Estimator-Run
 
 def runner_creation_qc(num_qubits: int, gate_sequence: list):
     def run():
@@ -242,54 +252,17 @@ def runner_creation_qc(num_qubits: int, gate_sequence: list):
     return run
 
 
-def runner_creation_est(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-
-    def run():
-        qc = QuantumCircuit(num_qubits)
-        for gn, ws, ps in gate_sequence:
-            apply_gate(qc, gn, ws, ps)
-        estimator.run([(qc, observable)]).result()
-
-    return run
-
-
-def runner_creation_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-
-    def run():
-        qc = QuantumCircuit(num_qubits)
-        for gn, ws, ps in gate_sequence:
-            apply_gate(qc, gn, ws, ps)
-        tc = transpile(qc, optimization_level=1)
-        estimator.run([(tc, observable)]).result()
-
-    return run
-
-
 # ------ EXECUTION ------
 # Misst: wie lange dauert die Simulation nach dem Aufbau?
-# Circuit und (wo nötig) transpilierter Circuit sind vorgebaut.
 #
-#   qc:   Statevector(circuit) — reiner Zustandsvektor OHNE Observable,
-#         damit 1:1 vergleichbar mit ex.statevector des Executor-Benchmarks
-#   est:  StatevectorEstimator.run() – circuit vorgebaut (mit Observable ⟨Z₀⟩)
-#   estt: StatevectorEstimator.run() – circuit vortranspiliert
+#   qc:   StatevectorEstimator.run([(circuit, ⟨Z₀⟩)]) — Erwartungswert über
+#         dasselbe Primitiv, das der Executor intern nutzt (s. Modul-Docstring).
+#         Gleiche Aufgabe wie qml.expval(qml.PauliZ(0)) im PennyLane-Roh- und
+#         ex.expectation_value im Executor-Benchmark.
+#         Circuit, Observable und Estimator im Setup gebaut (ungemessen), nur
+#         der Auswertungs-Aufruf liegt im Messfenster.
 
 def runner_execution_qc(num_qubits: int, gate_sequence: list):
-    qc = QuantumCircuit(num_qubits)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
-
-    def run():
-        Statevector(qc)
-
-    return run
-
-
-def runner_execution_est(num_qubits: int, gate_sequence: list):
     observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
     estimator  = StatevectorEstimator()
     qc = QuantumCircuit(num_qubits)
@@ -298,20 +271,6 @@ def runner_execution_est(num_qubits: int, gate_sequence: list):
 
     def run():
         estimator.run([(qc, observable)]).result()
-
-    return run
-
-
-def runner_execution_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-    qc = QuantumCircuit(num_qubits)
-    for gn, ws, ps in gate_sequence:
-        apply_gate(qc, gn, ws, ps)
-    tc = transpile(qc, optimization_level=1)
-
-    def run():
-        estimator.run([(tc, observable)]).result()
 
     return run
 
@@ -319,12 +278,14 @@ def runner_execution_estt(num_qubits: int, gate_sequence: list):
 # ------ GRADIENT ------
 # Misst: reine Ausführungszeit der Gradienten-Berechnung via Parameter-Shift.
 #
-#   Trainierbare Schicht: der Anteil TRAINABLE_RATIO der Gatter wird durch
-#   trainierbare RY(θₖ) ERSETZT, zyklisch auf die Qubits verteilt
-#   (wire = k % num_qubits). Der Rest bleibt fester Gate-Block; die Gesamt-
-#   Gatterzahl bleibt total_gates — identisch zum PennyLane-Roh- und zum
-#   Executor-Benchmark (dort: gleiche Ersetzung, Executor-Qiskit rechnet
-#   ebenfalls Parameter-Shift via OpTree → gleicher Algorithmus).
+#   Trainierbare Schicht: jedes step-te Gatter (step = round(1/TRAINABLE_RATIO))
+#   wird durch ein trainierbares RY(θₖ) ERSETZT — die trainierbaren Parameter
+#   liegen gleichmäßig über den GANZEN Circuit verstreut (kein RY-Block am
+#   Anfang). Das RY sitzt auf dem Wire des ersetzten Gatters (ws[0]); die
+#   übrigen Gatter bleiben fest. Die Gesamt-Gatterzahl bleibt total_gates —
+#   identisch zum PennyLane-Roh- und zum Executor-Benchmark (dort: gleiche
+#   Ersetzung, Executor-Qiskit rechnet ebenfalls Parameter-Shift via OpTree →
+#   gleicher Algorithmus).
 #   grad_k = [f(θₖ + π/2) − f(θₖ − π/2)] / 2
 #
 # ACHTUNG Kosten: Parameter-Shift braucht 2 Ausführungen PRO Parameter und
@@ -333,9 +294,9 @@ def runner_execution_estt(num_qubits: int, gate_sequence: list):
 # teuer — das gilt für Roh- UND Executor-Benchmark gleichermaßen und ist
 # daher fair, aber laufzeitintensiv.
 #
-#   qc:   Statevector + manueller Param-Shift (assign_parameters per Shift)
-#   est:  StatevectorEstimator + Param-Shift (Parameter-Binding im Primitiv)
-#   estt: StatevectorEstimator + Param-Shift (vorkompilierter Circuit)
+#   qc:   manueller Param-Shift, jede Auswertung über StatevectorEstimator
+#         (Parameter-Binding im Primitiv) — dieselbe Ebene wie der Executor,
+#         der intern ebenfalls Estimator-basierten Param-Shift rechnet.
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
 # MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py und
@@ -343,55 +304,63 @@ def runner_execution_estt(num_qubits: int, gate_sequence: list):
 TRAINABLE_RATIO = 0.3
 
 
-def split_trainable(gate_sequence: list):
-    """Teilt die Sequenz in (n_trainable, fixed_gates) — identisch zu den
-    anderen Benchmarks.
+def trainable_layout(n_gates: int):
+    """Verteilung der trainierbaren RY über den GANZEN Circuit (kein RY-Block) —
+    identisch zu den anderen Benchmarks.
 
-    Die ersten TRAINABLE_RATIO der Gatter werden durch trainierbare RY ersetzt,
-    der Rest bleibt fest. Es gilt
-        n_trainable + len(fixed_gates) == len(gate_sequence),
-    sodass die Gesamt-Gatterzahl total_gates erhalten bleibt.
+    Jedes ``step``-te Gatter (step = round(1/TRAINABLE_RATIO)) wird durch ein
+    trainierbares RY ERSETZT; die übrigen Gatter bleiben fest. n_trainable ist
+    deterministisch (hängt nur von total_gates ab, nicht vom Seed); die Gesamt-
+    Gatterzahl bleibt total_gates.
     """
-    n_trainable = max(1, round(TRAINABLE_RATIO * len(gate_sequence)))
-    fixed_gates = gate_sequence[n_trainable:]
-    return n_trainable, fixed_gates
+    step        = max(1, round(1 / TRAINABLE_RATIO))
+    n_trainable = len(range(0, n_gates, step))
+    return n_trainable, step
+
+
+# Rotationsachsen, die an den trainierbaren Positionen zyklisch (über den Zähler
+# k) eingesetzt werden. Alle drei sind 1-Parameter-Gatter → die Zähl-Logik
+# (params[k], n_trainable) bleibt unverändert korrekt. Auf ein Set beschränken
+# (z. B. ["RY"]) genügt, um nur eine Achse zu nutzen. MUSS mit TRAINABLE_GATES
+# der anderen Benchmarks synchron sein.
+TRAINABLE_GATES = ["RX", "RY", "RZ"]
+
+
+def apply_trainable(qc: QuantumCircuit, k: int, param, wire: int) -> None:
+    gate = TRAINABLE_GATES[k % len(TRAINABLE_GATES)]
+    if   gate == "RX": qc.rx(param, wire)
+    elif gate == "RY": qc.ry(param, wire)
+    else:              qc.rz(param, wire)
 
 
 def _build_trainable_circuit(num_qubits: int, gate_sequence: list):
-    """Trainierbarer Circuit wie in PennyLane-/Executor-Benchmark:
-    n_trainable RY(θₖ) auf wire k % num_qubits + fester Rest-Gate-Block."""
-    n_trainable, fixed_gates = split_trainable(gate_sequence)
+    """Trainierbarer Circuit wie in PennyLane-/Executor-Benchmark: jedes step-te
+    Gatter durch eine trainierbare Rotation RX/RY/RZ(θₖ) — zyklisch über k — auf
+    wire ws[0] ersetzt, verstreut über den ganzen Circuit; die übrigen Gatter
+    bleiben fest."""
+    n_trainable, step = trainable_layout(len(gate_sequence))
     pv = ParameterVector("θ", length=n_trainable)
     qc = QuantumCircuit(num_qubits)
-    for k in range(n_trainable):
-        qc.ry(pv[k], k % num_qubits)
-    for gn, ws, ps in fixed_gates:
-        apply_gate(qc, gn, ws, ps)
+    k = 0
+    for i, (gn, ws, ps) in enumerate(gate_sequence):
+        if i % step == 0:
+            apply_trainable(qc, k, pv[k], ws[0])   # RX / RY / RZ im Wechsel
+            k += 1
+        else:
+            apply_gate(qc, gn, ws, ps)
     return qc, pv, n_trainable
 
 
 def runner_gradient_qc(num_qubits: int, gate_sequence: list):
     observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    qc, pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
-    param_values = np.zeros(n_trainable)
-
-    def run():
-        for i in range(n_trainable):
-            plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
-            minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
-            ev_p = Statevector(qc.assign_parameters(dict(zip(pv, plus_vals)))).expectation_value(observable).real
-            ev_m = Statevector(qc.assign_parameters(dict(zip(pv, minus_vals)))).expectation_value(observable).real
-            _ = (ev_p - ev_m) / 2
-
-    return run
-
-
-def runner_gradient_est(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
     estimator  = StatevectorEstimator()
     qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
     param_values = np.zeros(n_trainable)
 
+    # Die Parameter werden IM Primitiv gebunden (dritter Eintrag des PUB) statt
+    # vorher per assign_parameters — genauso macht es der Executor. Bewusst
+    # NICHT gebatcht (alle Shifts in einem run()-Aufruf): der Executor wertet
+    # ebenfalls sequenziell aus, und gemessen bringt Batching hier nur ~6 %.
     def run():
         for i in range(n_trainable):
             plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
@@ -402,50 +371,31 @@ def runner_gradient_est(num_qubits: int, gate_sequence: list):
 
     return run
 
-
-def runner_gradient_estt(num_qubits: int, gate_sequence: list):
-    observable = SparsePauliOp.from_sparse_list([("Z", [0], 1.0)], num_qubits=num_qubits)
-    estimator  = StatevectorEstimator()
-    qc, _pv, n_trainable = _build_trainable_circuit(num_qubits, gate_sequence)
-    tc           = transpile(qc, optimization_level=1)
-    param_values = np.zeros(n_trainable)
-
-    def run():
-        for i in range(n_trainable):
-            plus_vals  = param_values.copy(); plus_vals[i]  += np.pi / 2
-            minus_vals = param_values.copy(); minus_vals[i] -= np.pi / 2
-            ev_p = float(estimator.run([(tc, observable, plus_vals)]).result()[0].data.evs)
-            ev_m = float(estimator.run([(tc, observable, minus_vals)]).result()[0].data.evs)
-            _ = (ev_p - ev_m) / 2
-
-    return run
-
 # =========================================================
 # Modus → Runner-Liste auflösen
 # =========================================================
 # Jeder Eintrag: (csv_prefix, plot_label, plot_farbe, builder)
 #
-# Vergleich mit dem Executor-Benchmark (BACKEND_CHOICE="qiskit"): Paar-Partner
-# ist die qc-Linie (Statevector-Pfad — der Executor nutzt intern Statevector
-# bzw. OpTree-Param-Shift über einen Estimator). est/estt sind Kontext-Linien
-# ohne Executor-Pendant; die Cache-Spalte (qc) des Executor-Benchmarks nicht
-# paarweise vergleichen (Ergebnis-Cache-Treffer, s. Docstring dort).
+# Eine Linie. Sie ist der Paar-Partner zum Executor-Benchmark
+# (BACKEND_CHOICE="qiskit"): creation baut nur den Circuit (Executor:
+# transpile_circuit, ebenfalls ohne Ausführung), execution und gradient laufen
+# über dasselbe Estimator-Primitiv, das der Executor intern nutzt. Damit misst
+# "Executor − Roh" in allen drei Modi ausschließlich die Abstraktionsschicht.
+# Die frühere estt-Linie (vortranspiliert) ist entfernt: der Executor
+# transpiliert bei lokalem Backend nicht (s. _convert_to_optree).
+#
+# Der CSV-Präfix bleibt "qc" — kompatibel zu bestehenden Läufen und zur
+# Framework-Erkennung in plot_from_csv.py.
 
 MODE_RUNNERS = {
     "creation": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_creation_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_creation_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_creation_estt),
+        ("qc", "Qiskit (QuantumCircuit)", "tab:blue", runner_creation_qc),
     ],
     "execution": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_execution_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_execution_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_execution_estt),
+        ("qc", "Qiskit (Estimator)", "tab:blue", runner_execution_qc),
     ],
     "gradient": [
-        ("qc",   "QuantumCircuit + Statevector", "tab:blue",   runner_gradient_qc),
-        ("est",  "Estimator (kein Transpile)",   "tab:orange", runner_gradient_est),
-        ("estt", "Estimator (transpiliert)",     "tab:green",  runner_gradient_estt),
+        ("qc", "Qiskit (Estimator)", "tab:blue", runner_gradient_qc),
     ],
 }
 
@@ -462,13 +412,17 @@ MODES_TO_RUN = list(MODE_RUNNERS) if BENCHMARK_MODE == "all" else [BENCHMARK_MOD
 # Timing
 # =========================================================
 
-def measure_runtime(func, repeats: int = 5) -> dict:
-    func()  # Warm-up
+def measure_runtime(runner_factory, repeats: int = 5) -> dict:
+    # Jede Wiederholung bekommt einen eigenen Seed (SEED + r) → ein anderer
+    # Zufalls-Circuit pro Wiederholung. Der Aufbau (runner_factory) läuft
+    # ungemessen, danach ein ungemessener Warm-up-Aufruf, dann der Zeit-Messlauf.
     times = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         t0 = time.perf_counter()
-        func()
+        runner()
         times.append(time.perf_counter() - t0)
     return {
         "avg": float(np.mean(times)),
@@ -485,13 +439,16 @@ def measure_runtime(func, repeats: int = 5) -> dict:
 # NumPy-C-Buffer werden bewusst nicht erfasst (bei 10-15 Qubits vernachlässigbar).
 # Getrennt vom Timing, da tracemalloc die Laufzeit verfälschen würde.
 
-def measure_memory(func, repeats: int = 5) -> dict:
-    func()  # Warm-up (lazy Imports/Caches nicht mitmessen)
+def measure_memory(runner_factory, repeats: int = 5) -> dict:
+    # Wie measure_runtime: eigener Seed (SEED + r) pro Wiederholung, Warm-up
+    # (lazy Imports/Caches nicht mitmessen) ungemessen vor der Peak-Messung.
     peaks = []
-    for _ in range(repeats):
+    for r in range(repeats):
+        runner = runner_factory(SEED + r)
+        runner()                              # Warm-up (nicht gemessen)
         gc.collect()
         tracemalloc.start()
-        func()
+        runner()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         peaks.append(peak / 1024**2)   # MiB
@@ -518,8 +475,6 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
             print(f"Qubits={num_qubits}  Gates={total_gates}")
 
-            gate_sequence = generate_gate_sequence(num_qubits, total_gates, ACTIVE_GATE_SET, seed=SEED)
-
             row = {
                 "timestamp":      datetime.now().isoformat(),
                 "gate_set":       GATE_SET_CHOICE,
@@ -530,9 +485,15 @@ def run_benchmark(mode: str) -> pd.DataFrame:
 
             log_parts = []
             for prefix, _label, _color, builder in runners:
-                runner = builder(num_qubits, gate_sequence)
-                stats  = measure_runtime(runner, REPEATS)
-                mem    = measure_memory(runner, REPEATS)
+                # Fabrik: erzeugt pro Seed eine frische Gatter-Sequenz und den
+                # dazugehörigen Runner. Die Mess-Funktionen rufen sie mit
+                # SEED + r auf → anderer Zufalls-Circuit pro Wiederholung.
+                def make_runner(seed, _builder=builder):
+                    seq = generate_gate_sequence(num_qubits, total_gates, ACTIVE_GATE_SET, seed=seed)
+                    return _builder(num_qubits, seq)
+
+                stats = measure_runtime(make_runner, REPEATS)
+                mem   = measure_memory(make_runner, REPEATS)
                 row.update({f"{prefix}_{k}":     v for k, v in stats.items()})
                 row.update({f"{prefix}_mem_{k}": v for k, v in mem.items()})
                 log_parts.append(f"{prefix}={stats['avg']:.5f}s/{mem['avg']:.1f}MiB")
