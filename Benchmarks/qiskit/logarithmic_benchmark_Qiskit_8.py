@@ -50,6 +50,10 @@ if hasattr(sys.stdout, "reconfigure"):
 #                             ControlledPhaseShift  (ohne T/Rot/Toffoli —
 #                             1:1 vergleichbar mit "non_clifford" des
 #                             Executor-Benchmarks, s. Definition unten)
+#  "clifford_plus_non_clifford"
+#                           → beide obigen kombiniert (13 Gatter): H, S, CNOT,
+#                             PauliX/Y/Z, RX, RY, RZ, CRX, CRY, CRZ,
+#                             ControlledPhaseShift
 #  "clifford_t"             → H, T, CNOT
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
@@ -58,10 +62,11 @@ if hasattr(sys.stdout, "reconfigure"):
 # rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
 # eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
 # Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
-# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable".
-# NICHT vergleichbar: "non_clifford" (10 statt 8 Gatter) und "rot_cnot".
+# "clifford_t", "single_qubit_plus_cnot", "non_clifford_comparable"
+# (dort "non_clifford") und "clifford_plus_non_clifford" (gleicher Name dort).
+# NICHT vergleichbar: "non_clifford" (10 statt 7 Gatter) und "rot_cnot".
 #
-GATE_SET_CHOICE = "non_clifford_comparable"
+GATE_SET_CHOICE = "clifford_plus_non_clifford"
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -110,6 +115,19 @@ NON_CLIFFORD_COMPARABLE_GATES = [
     "CRX", "CRY", "CRZ", "ControlledPhaseShift",
 ]
 
+# Clifford + non-Clifford in EINEM Set (13 Gatter). Reihenfolge: erst Clifford,
+# dann non-Clifford — MUSS in allen drei Benchmark-Dateien identisch sein, da
+# rng.choice Indizes über die Liste zieht.
+# Vergleichbar mit "clifford_plus_non_clifford" des Executor-Benchmarks: gleiche
+# Länge, gleiche Reihenfolge, und pro Gattertyp gleich viele RNG-Aufrufe. Der
+# kritische Fall ist CNOT/cx — beide Generatoren ziehen dafür KEINEN Winkel
+# (hier: `params = [...] if gate != "CNOT" else []`), sonst würde der
+# Zufallsstrom auseinanderlaufen.
+# Hinweis: ~46 % der Gatter sind damit winkelfrei (vorher 0 %). n_trainable
+# bleibt trotzdem seed-unabhängig, da trainable_layout nur von total_gates
+# abhängt und apply_trainable das Gatter unabhängig von seinem Typ ersetzt.
+CLIFFORD_PLUS_NON_CLIFFORD_GATES = CLIFFORD_GATES + NON_CLIFFORD_COMPARABLE_GATES
+
 UNIVERSAL_GATE_SETS = {
     "clifford_t":             ["Hadamard", "T", "CNOT"],
     "single_qubit_plus_cnot": ["RX", "RY", "RZ", "CNOT"],
@@ -119,9 +137,10 @@ UNIVERSAL_GATE_SETS = {
 
 def resolve_gate_set(choice: str) -> list:
     mapping = {
-        "clifford":                CLIFFORD_GATES,
-        "non_clifford":            NON_CLIFFORD_GATES,
-        "non_clifford_comparable": NON_CLIFFORD_COMPARABLE_GATES,
+        "clifford":                     CLIFFORD_GATES,
+        "non_clifford":                 NON_CLIFFORD_GATES,
+        "non_clifford_comparable":      NON_CLIFFORD_COMPARABLE_GATES,
+        "clifford_plus_non_clifford":   CLIFFORD_PLUS_NON_CLIFFORD_GATES,
         **UNIVERSAL_GATE_SETS,
     }
     if choice not in mapping:
@@ -142,13 +161,15 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration
 # =========================================================
 
-RESULT_DIR = Path(__file__).parent.parent / "Results" / "Qiskit"
+# Datei liegt in Benchmarks/qiskit/ → drei Ebenen hoch zur Projekt-Wurzel.
+# (parent = qiskit/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
+RESULT_DIR = Path(__file__).parent.parent.parent / "Results" / "Qiskit"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5, 8, 10, 12, 15]
+QUBIT_CONFIGS = [8]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)

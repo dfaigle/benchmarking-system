@@ -63,7 +63,7 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "pennylane"  → Executor.create("pennylane")
 #  "qiskit"     → Executor.create("qiskit")
 #
-BACKEND_CHOICE = "pennylane"
+BACKEND_CHOICE = "qiskit"
 
 # =========================================================
 # ➤  GATE-SET AUSWAHL  ←  hier anpassen
@@ -176,7 +176,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5]
+QUBIT_CONFIGS = [10]
 
 GATE_CONFIGS = np.unique(
     np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
@@ -187,14 +187,18 @@ GATE_CONFIGS = np.unique(
 METHODS = ["qnc"]
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Executor/<timestamp>_qubits-<...>/
+# Pro Lauf ein eigener Unterordner:
+#   Results/Executor/<timestamp>_qubits-<...>_<backend>/
+# Das Backend steht mit im Ordnernamen, weil beide Backends in denselben
+# Executor-Ordner schreiben — so sind pennylane- und qiskit-Läufe auf einen
+# Blick unterscheidbar.
 # =========================================================
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 qubit_string = "-".join(map(str, QUBIT_CONFIGS))
 
-RUN_DIR = RESULT_DIR / f"{timestamp}_qubits-{qubit_string}"
+RUN_DIR = RESULT_DIR / f"{timestamp}_qubits-{qubit_string}_{BACKEND_CHOICE}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 # CSV-/Plot-Dateinamen entstehen pro Modus in run_benchmark() bzw. im Haupt-Ablauf.
