@@ -24,9 +24,12 @@ CSVs und die Vergleichs-Skripte weiter passen.
 
 Hinweis Vergleichbarkeit: Identische Gatter-Sequenzen (gleicher Seed) entstehen
 nur, wenn beide Benchmarks eine Gate-Liste GLEICHER Länge und Reihenfolge
-nutzen — rng.choice zieht Indizes über die Liste. Das gilt für "clifford",
-"clifford_t" und "single_qubit_plus_cnot" (gleicher Name in beiden Skripten)
-sowie für "non_clifford" HIER ↔ "non_clifford_comparable" im Roh-Benchmark.
+nutzen — rng.choice zieht Indizes über die Liste. Zusätzlich muss pro Gattertyp
+die Zahl der RNG-Aufrufe übereinstimmen (ein Gatter ohne Winkel verbraucht
+keinen rng.uniform-Aufruf und verschiebt den Zufallsstrom). Das gilt für
+"clifford", "clifford_t" und "single_qubit_plus_cnot" (gleicher Name in beiden
+Skripten) sowie für "non_clifford" HIER ↔ "non_clifford_comparable" im
+Roh-Benchmark (beide 7 Gatter, ohne T).
 Das Roh-Set "non_clifford" (mit Rot/Toffoli, 10 Gatter) ist NICHT vergleichbar.
 """
 
@@ -67,16 +70,17 @@ BACKEND_CHOICE = "pennylane"
 # =========================================================
 #
 #  "clifford"               → h, s, cx, x, y, z
-#  "non_clifford"           → t, rx, ry, rz, crx, cry, crz, cp
+#  "non_clifford"           → rx, ry, rz, crx, cry, crz, cp   (7 Gatter, ohne t)
 #  "clifford_t"             → h, t, cx
 #  "single_qubit_plus_cnot" → rx, ry, rz, cx
 #
 # Vergleichbarkeit mit dem Roh-Benchmark (identische Sequenz bei gleichem Seed):
 #   "clifford", "clifford_t", "single_qubit_plus_cnot" → gleicher Name dort
 #   "non_clifford"                                     → dort "non_clifford_comparable"
-#                                                        wählen (8 Gatter, gleiche
-#                                                        Reihenfolge, ohne Rot/Toffoli)!
-# Das Roh-Set "non_clifford" (10 Gatter) erzeugt eine ANDERE Sequenz.
+#                                                        wählen (ebenfalls 7 Gatter,
+#                                                        gleiche Reihenfolge)!
+# Das Roh-Set "non_clifford" (10 Gatter, mit Rot/Toffoli) erzeugt eine ANDERE
+# Sequenz und ist NICHT vergleichbar.
 #
 GATE_SET_CHOICE = "non_clifford"
 
@@ -84,8 +88,9 @@ GATE_SET_CHOICE = "non_clifford"
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
 # =========================================================
 #
-#  "creation"  → Zeit, aus der Gatter-Sequenz einen lauffähigen Zustand
-#                herzustellen (Aufbau + Transpile bzw. erster Aufruf).
+#  "creation"  → Zeit, den abstrakten Circuit zu bauen und ins native Format
+#                zu übersetzen (transpile_circuit) — OHNE Ausführung, analog
+#                zum Roh-Benchmark (dort: construct_tape bzw. Circuit befüllen).
 #  "execution" → Reine Ausführungszeit des Erwartungswerts ⟨Z₀⟩ nach dem Aufbau.
 #  "gradient"  → Gradienten-Berechnung (⟨Z₀⟩; TRAINABLE_RATIO der Gatter sind
 #                durch trainierbare RY ersetzt, verstreut über den ganzen
@@ -104,9 +109,19 @@ SHOW_PLOTS = True
 # Gate-Definitionen  (kanonische Namen, kleingeschrieben)
 # =========================================================
 
+# "non_clifford" spiegelt Position für Position NON_CLIFFORD_COMPARABLE_GATES des
+# Roh-Benchmarks (["RX","RY","RZ","CRX","CRY","CRZ","ControlledPhaseShift"]).
+# Gleiche Länge + Reihenfolge UND pro Gattertyp gleich viele RNG-Aufrufe →
+# identische Sequenz bei gleichem Seed. Bei Änderungen beide Listen synchron
+# halten!
+# OHNE "t": T ist das einzige Gatter dieses Sets ohne Winkel — es verbraucht
+# keinen rng.uniform-Aufruf und verschiebt damit den gesamten Zufallsstrom
+# gegenüber dem Roh-Benchmark. Solange "t" hier drinstand (8 statt 7 Gatter),
+# erzeugten Roh- und Executor-Benchmark bei gleichem Seed VERSCHIEDENE
+# Schaltkreise und waren nicht vergleichbar.
 GATE_SETS = {
     "clifford":               ["h", "s", "cx", "x", "y", "z"],
-    "non_clifford":           ["t", "rx", "ry", "rz", "crx", "cry", "crz", "cp"],
+    "non_clifford":           ["rx", "ry", "rz", "crx", "cry", "crz", "cp"],
     "clifford_t":             ["h", "t", "cx"],
     "single_qubit_plus_cnot": ["rx", "ry", "rz", "cx"],
 }
@@ -142,10 +157,10 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 SEED    = 42
 REPEATS = 4
 
-QUBIT_CONFIGS = [5,10,]
+QUBIT_CONFIGS = [5]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(1000), 20)).astype(int)
 )
 
 #: Präfix der gemessenen Linie — identisch zum Roh-Benchmark, damit die CSVs
@@ -297,9 +312,18 @@ def build_runners(mode: str, num_qubits: int, sequence: list) -> dict:
     ex = Executor.create(BACKEND_CHOICE)   # ohne Ergebnis-Cache (Standardfall)
 
     # ------------------------------------------------ creation
+    # NUR bauen + ins native Format übersetzen, NICHT ausführen — sonst ist der
+    # Modus nicht mit den Roh-Benchmarks vergleichbar, die im creation-Modus
+    # ebenfalls nur bauen (PennyLane: construct_tape ohne execute, Qiskit:
+    # QuantumCircuit befüllen). Mit dem früheren ex.statevector(...) steckte eine
+    # volle Statevector-Simulation im Messfenster: bei 10 Qubits/2000 Gattern
+    # 1.58 s statt 0.018 s — die Differenz "Executor − Roh" maß damit zu ~99 %
+    # die Simulation statt des Abstraktions-Overheads.
+    # transpile_circuit() greift hier keinen Cache ab: caching=False → kein
+    # Ergebnis-Cache, und build_abstract() liefert pro Aufruf ein neues Objekt.
     if mode == "creation":
         def r_qnc():
-            ex.statevector(build_abstract(num_qubits, sequence))
+            ex.transpile_circuit(build_abstract(num_qubits, sequence))
 
         return {"qnc": r_qnc}
 
