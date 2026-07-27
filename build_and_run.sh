@@ -1,4 +1,5 @@
 if [ --build ]; then
+	git submodule update --init --recursive
 	docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg USERNAME=$(whoami) -f Dockerfile -t "$(whoami)/abstraction-benchmark:0.1.0" .
 fi
 

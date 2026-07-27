@@ -24,8 +24,10 @@ RUN groupadd --gid "${GID}" "${USERNAME}" \
     && chown -R "${UID}:${GID}" /app /home/"${USERNAME}"
 
 COPY requirements.txt ./
+COPY vendor/executor ./vendor/executor
 
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt \
+    && pip install ./vendor/executor
 
 RUN chown -R "${UID}:${GID}" /app
 
