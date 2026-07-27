@@ -1,0 +1,4 @@
+[submodule "vendor/executor"]
+	path = vendor/executor
+	url = git@github.com:flaqship/qc-executor.git
+	branch = legacy-removal
