@@ -103,7 +103,7 @@ GATE_SET_CHOICE = "clifford_plus_non_clifford"
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner.
 #
-BENCHMARK_MODE = "all"
+BENCHMARK_MODE = "gradient"
 
 # Plots am Ende interaktiv anzeigen? Für Batch-/Headless-Läufe auf False setzen
 # (die PNGs werden unabhängig davon immer gespeichert).
