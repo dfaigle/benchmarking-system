@@ -1,8 +1,0 @@
-Benchmakring methoden:
-Everything at once(wie jetzt)
-Aufbauend (circuits mit log aufsteigender gatter anzahl)
-
-Paramter:
-erstell zeit
-ausführungszeit
-gradienten berechnungs zeit
