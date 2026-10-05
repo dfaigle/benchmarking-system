@@ -26,40 +26,40 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-ROOT = Path(__file__).parent.parent  # Benchmarks/ -> Projekt-Wurzel
+ROOT = Path(__file__).parent.parent.parent  # benchmarks/plot_forms/ -> Projekt-Wurzel
 
 # Qubit-Zahl -> {PennyLane-Roh-Lauf-Ordner, Executor(PennyLane)-Lauf-Ordner je Modus}
 RUNS = {
     5: {
-        "pennylane_dir": "Results/Pennylane/2026-07-27_10-26-32_qubits-5",
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-26-32_qubits-5",
         "executor_dirs": {
-            "creation":  "Results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
-            "execution": "Results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
-            "gradient":  "Results/Executor/2026-07-31_20-59-17_qubits-5_pennylane",
+            "creation":  "raw_results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-17_qubits-5_pennylane",
         },
     },
     8: {
-        "pennylane_dir": "Results/Pennylane/2026-07-27_10-27-07_qubits-8",
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-27-07_qubits-8",
         "executor_dirs": {
-            "creation":  "Results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
-            "execution": "Results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
-            "gradient":  "Results/Executor/2026-07-31_20-59-25_qubits-8_pennylane",
+            "creation":  "raw_results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-25_qubits-8_pennylane",
         },
     },
     10: {
-        "pennylane_dir": "Results/Pennylane/2026-07-27_10-27-40_qubits-10",
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-27-40_qubits-10",
         "executor_dirs": {
-            "creation":  "Results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
-            "execution": "Results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
-            "gradient":  "Results/Executor/2026-07-31_20-59-32_qubits-10_pennylane",
+            "creation":  "raw_results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-32_qubits-10_pennylane",
         },
     },
     12: {
-        "pennylane_dir": "Results/Pennylane/2026-07-27_10-28-12_qubits-12",
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-28-12_qubits-12",
         "executor_dirs": {
-            "creation":  "Results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
-            "execution": "Results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
-            "gradient":  "Results/Executor/2026-07-31_20-59-39_qubits-12_pennylane",
+            "creation":  "raw_results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-39_qubits-12_pennylane",
         },
     },
 }
@@ -202,7 +202,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    out_dir = ROOT / "Results" / "FrameworkVergleich_5-12q_pennylane"
+    out_dir = ROOT / "final_plotted_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "pennylane_vs_executor_qubits_mem.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")

@@ -23,14 +23,14 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-ROOT = Path(__file__).parent.parent  # Benchmarks/ -> Projekt-Wurzel
+ROOT = Path(__file__).parent.parent.parent  # benchmarks/plot_forms/ -> Projekt-Wurzel
 
 # Qubit-Zahl -> Tape-vs-QNode-Lauf-Ordner
 RUNS = {
-    5:  "Results/TapeVsQNode/2026-07-18_20-28-46_qubits-5",
-    8:  "Results/TapeVsQNode/2026-07-18_20-29-07_qubits-8",
-    10: "Results/TapeVsQNode/2026-07-18_20-29-39_qubits-10",
-    12: "Results/TapeVsQNode/2026-07-18_20-30-00_qubits-12",
+    5:  "raw_results/TapeVsQNode/2026-07-18_20-28-46_qubits-5",
+    8:  "raw_results/TapeVsQNode/2026-07-18_20-29-07_qubits-8",
+    10: "raw_results/TapeVsQNode/2026-07-18_20-29-39_qubits-10",
+    12: "raw_results/TapeVsQNode/2026-07-18_20-30-00_qubits-12",
 }
 
 GATE_SET = "clifford"
@@ -160,7 +160,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    out_dir = ROOT / "Results" / "TapeVsQNode" / "QubitVergleich_Zeit" / "kombiniert"
+    out_dir = ROOT / "final_plotted_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "tape_vs_qnode_qubits_time.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")

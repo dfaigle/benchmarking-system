@@ -22,14 +22,14 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-ROOT = Path(__file__).parent.parent  # Benchmarks/ -> Projekt-Wurzel
+ROOT = Path(__file__).parent.parent.parent  # benchmarks/plot_forms/ -> Projekt-Wurzel
 
 # Qubit-Zahl -> (Qiskit-Roh-Lauf-Ordner, Executor-Qiskit-Lauf-Ordner)
 RUNS = {
-    5:  ("Results/Qiskit/2026-07-27_10-29-55_qubits-5",  "Results/Executor/2026-07-27_10-37-20_qubits-5_qiskit"),
-    8:  ("Results/Qiskit/2026-07-27_10-30-25_qubits-8",  "Results/Executor/2026-07-27_10-37-53_qubits-8_qiskit"),
-    10: ("Results/Qiskit/2026-07-27_10-31-09_qubits-10", "Results/Executor/2026-07-27_10-38-19_qubits-10_qiskit"),
-    12: ("Results/Qiskit/2026-07-27_10-31-33_qubits-12", "Results/Executor/2026-07-27_10-38-45_qubits-12_qiskit"),
+    5:  ("raw_results/Qiskit/2026-07-27_10-29-55_qubits-5",  "raw_results/Executor/2026-07-27_10-37-20_qubits-5_qiskit"),
+    8:  ("raw_results/Qiskit/2026-07-27_10-30-25_qubits-8",  "raw_results/Executor/2026-07-27_10-37-53_qubits-8_qiskit"),
+    10: ("raw_results/Qiskit/2026-07-27_10-31-09_qubits-10", "raw_results/Executor/2026-07-27_10-38-19_qubits-10_qiskit"),
+    12: ("raw_results/Qiskit/2026-07-27_10-31-33_qubits-12", "raw_results/Executor/2026-07-27_10-38-45_qubits-12_qiskit"),
 }
 
 GATE_SET = "clifford_plus_non_clifford"
@@ -139,7 +139,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    out_dir = ROOT / "Results" / "FrameworkVergleich_5-12q_qiskit"
+    out_dir = ROOT / "final_plotted_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "qiskit_vs_executor_qubits_time.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
