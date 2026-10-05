@@ -147,7 +147,7 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration  (identisch zum Roh-Benchmark)
 # =========================================================
 
-RESULT_DIR = Path(__file__).parent.parent / "Results" / "TapeVsQNode"
+RESULT_DIR = Path(__file__).parent.parent.parent.parent / "raw_results" / "TapeVsQNode"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
@@ -160,7 +160,7 @@ GATE_CONFIGS = np.unique(
 )
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/TapeVsQNode/run_<N>/
+# Pro Lauf ein eigener Unterordner: raw_results/TapeVsQNode/run_<N>/
 # =========================================================
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

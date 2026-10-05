@@ -163,7 +163,7 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 
 # Datei liegt in Benchmarks/qiskit/ → drei Ebenen hoch zur Projekt-Wurzel.
 # (parent = qiskit/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
-RESULT_DIR = Path(__file__).parent.parent.parent / "Results" / "Qiskit"
+RESULT_DIR = Path(__file__).parent.parent.parent / "raw_results" / "Qiskit"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
@@ -176,7 +176,7 @@ GATE_CONFIGS = np.unique(
 )
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Qiskit/<timestamp>_qubits-<...>/
+# Pro Lauf ein eigener Unterordner: raw_results/Qiskit/<timestamp>_qubits-<...>/
 # =========================================================
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

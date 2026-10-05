@@ -7,7 +7,7 @@ N_CPUS=16
 
 docker run -d --rm \
     -v "$(pwd)/Benchmarks/logarithmic_benchmark_pennylane.py:/app/logarithmic_benchmark_pennylane.py:ro" \
-    -v "$(pwd)/Results:/results" \
+    -v "$(pwd)/raw_results:/results" \
     --shm-size=2g \
     --cpus $N_CPUS \
     --memory 128g \

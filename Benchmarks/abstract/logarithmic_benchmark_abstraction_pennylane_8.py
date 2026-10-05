@@ -170,7 +170,7 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 
 # Datei liegt in Benchmarks/abstract/ → drei Ebenen hoch zur Projekt-Wurzel.
 # (parent = abstract/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
-RESULT_DIR = Path(__file__).parent.parent.parent / "Results" / "Executor"
+RESULT_DIR = Path(__file__).parent.parent.parent / "raw_results" / "Executor"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
@@ -188,7 +188,7 @@ METHODS = ["qnc"]
 
 # =========================================================
 # Pro Lauf ein eigener Unterordner:
-#   Results/Executor/<timestamp>_qubits-<...>_<backend>/
+#   raw_results/Executor/<timestamp>_qubits-<...>_<backend>/
 # Das Backend steht mit im Ordnernamen, weil beide Backends in denselben
 # Executor-Ordner schreiben — so sind pennylane- und qiskit-Läufe auf einen
 # Blick unterscheidbar.

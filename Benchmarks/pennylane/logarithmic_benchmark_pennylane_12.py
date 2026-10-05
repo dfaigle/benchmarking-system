@@ -137,7 +137,7 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 
 # Datei liegt in Benchmarks/pennylane/ → drei Ebenen hoch zur Projekt-Wurzel.
 # (parent = pennylane/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
-RESULT_DIR = Path(__file__).parent.parent.parent / "Results" / "Pennylane"
+RESULT_DIR = Path(__file__).parent.parent.parent / "raw_results" / "Pennylane"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
@@ -156,7 +156,7 @@ GATE_CONFIGS = np.unique(
 # a_n = 10 * (100000 / 10)^(n / 19)
 
 # =========================================================
-# Pro Lauf ein eigener Unterordner: Results/Pennylane/<timestamp>_qubits-<...>/
+# Pro Lauf ein eigener Unterordner: raw_results/Pennylane/<timestamp>_qubits-<...>/
 # =========================================================
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
