@@ -44,6 +44,17 @@ Each benchmark script exists once per qubit count (`_5`, `_8`, `_10`, `_12`).
 Gate set (`GATE_SET_CHOICE`), mode (`BENCHMARK_MODE`) and, for the executor,
 the backend (`BACKEND_CHOICE`) are set at the top of each script.
 
+Further settings in the configuration block of each script:
+
+| Variable        | Meaning                                         | Default                                |
+|-----------------|-------------------------------------------------|----------------------------------------|
+| `QUBIT_CONFIGS` | qubit counts, e.g. `[5]`                        | matches the file suffix                |
+| `GATE_CONFIGS`  | gate counts, log-spaced via `np.logspace`       | 20 steps from 10 to 100,000 (`qnode_vs_tape`: 10,000) |
+| `REPEATS`       | repetitions per cell (avg/std/min/max in CSV)   | `4`                                    |
+
+To use fewer or more gates, change the bounds or the number of steps in
+`np.logspace(np.log10(10), np.log10(100000), 20)`.
+
 ## Setup and usage
 
 Setup (once):
