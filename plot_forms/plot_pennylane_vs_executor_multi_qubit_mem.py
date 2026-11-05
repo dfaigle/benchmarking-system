@@ -1,19 +1,23 @@
-"""Vergleichsplot Qiskit (roh) vs. Executor (Qiskit-Backend) über mehrere Qubit-Zahlen — Speicher.
+"""Vergleichsplot PennyLane (roh) vs. Executor (PennyLane-Backend) über mehrere Qubit-Zahlen — Speicher.
 
-Speicher-Gegenstück zu ``plot_qiskit_vs_executor_multi_qubit.py`` (dort Zeit):
-ein gemeinsames Diagramm für alle drei Benchmark-Modi (creation/execution/
-gradient) und mehrere Qubit-Zahlen, gleiches Encoding wie die Zeit-Variante:
-Farbe = Modus, Linienstil = Framework (roh durchgezogen, Executor strich-
-punktiert), Qubit-Zahl = Transparenz + Liniendicke (blass/dünn = wenige
-Qubits, kräftig/dick = viele Qubits). Jede Modus-Gruppe wird zusätzlich
-direkt an der Linie beschriftet statt nur über die Legende.
+Speicher-Gegenstück zu ``plot_pennylane_vs_executor_multi_qubit.py`` (dort
+Zeit): ein gemeinsames Diagramm für alle drei Benchmark-Modi (creation/
+execution/gradient) und mehrere Qubit-Zahlen, gleiches Encoding wie die
+Zeit-Variante: Farbe = Modus, Linienstil = Framework (roh durchgezogen,
+Executor strichpunktiert), Qubit-Zahl = Transparenz + Liniendicke (blass/
+dünn = wenige Qubits, kräftig/dick = viele Qubits). Jede Modus-Gruppe wird
+zusätzlich direkt an der Linie beschriftet statt nur über die Legende.
 
 Gemessen wird der Peak-Speicher (tracemalloc, MiB) statt der Laufzeit —
-Spalten ``qc_mem_avg`` / ``qnc_mem_avg`` statt ``qc_avg`` / ``qnc_avg``.
+Spalte ``qnc_mem_avg`` statt ``qnc_avg`` (beide Seiten nutzen denselben
+Spaltenpräfix ``qnc``, s. Zeit-Skript).
 
-Nimmt je Qubit-Zahl einen Qiskit-Roh-Lauf-Ordner und einen zugehörigen
-Executor(Qiskit-Backend)-Lauf-Ordner entgegen (s. RUNS unten) und liest
-daraus die drei Modus-CSVs.
+Anders als beim Qiskit-Vergleich liegen PennyLane-roh und Executor-Läufe
+nicht sauber in je einem Ordner pro Qubit-Zahl: Der Executor(PennyLane)-
+Gradientenmodus wurde separat nachgezogen (eigener Lauf-Ordner, s.
+``executor_dirs["gradient"]`` in RUNS) und bricht bei allen vier Qubit-
+Zahlen einheitlich bei 23357 Gattern ab (manueller Stopp) statt bei 100000
+wie creation/execution und die PennyLane-Roh-Seite.
 """
 
 from pathlib import Path
@@ -22,14 +26,42 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-ROOT = Path(__file__).parent.parent.parent  # benchmarks/plot_forms/ -> Projekt-Wurzel
+ROOT = Path(__file__).parent.parent  # plot_forms/ -> Projekt-Wurzel
 
-# Qubit-Zahl -> (Qiskit-Roh-Lauf-Ordner, Executor-Qiskit-Lauf-Ordner)
+# Qubit-Zahl -> {PennyLane-Roh-Lauf-Ordner, Executor(PennyLane)-Lauf-Ordner je Modus}
 RUNS = {
-    5:  ("raw_results/Qiskit/2026-07-27_10-29-55_qubits-5",  "raw_results/Executor/2026-07-27_10-37-20_qubits-5_qiskit"),
-    8:  ("raw_results/Qiskit/2026-07-27_10-30-25_qubits-8",  "raw_results/Executor/2026-07-27_10-37-53_qubits-8_qiskit"),
-    10: ("raw_results/Qiskit/2026-07-27_10-31-09_qubits-10", "raw_results/Executor/2026-07-27_10-38-19_qubits-10_qiskit"),
-    12: ("raw_results/Qiskit/2026-07-27_10-31-33_qubits-12", "raw_results/Executor/2026-07-27_10-38-45_qubits-12_qiskit"),
+    5: {
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-26-32_qubits-5",
+        "executor_dirs": {
+            "creation":  "raw_results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-34-54_qubits-5_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-17_qubits-5_pennylane",
+        },
+    },
+    8: {
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-27-07_qubits-8",
+        "executor_dirs": {
+            "creation":  "raw_results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-35-32_qubits-8_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-25_qubits-8_pennylane",
+        },
+    },
+    10: {
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-27-40_qubits-10",
+        "executor_dirs": {
+            "creation":  "raw_results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-36-03_qubits-10_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-32_qubits-10_pennylane",
+        },
+    },
+    12: {
+        "pennylane_dir": "raw_results/Pennylane/2026-07-27_10-28-12_qubits-12",
+        "executor_dirs": {
+            "creation":  "raw_results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
+            "execution": "raw_results/Executor/2026-07-27_10-36-28_qubits-12_pennylane",
+            "gradient":  "raw_results/Executor/2026-07-31_20-59-39_qubits-12_pennylane",
+        },
+    },
 }
 
 GATE_SET = "clifford_plus_non_clifford"
@@ -43,11 +75,11 @@ MODE_COLOR = {
 MODE_LABEL = {
     "creation":  "Erstellung",
     "execution": "Ausführung",
-    "gradient":  "Gradient (Parameter-Shift)",
+    "gradient":  "Gradient (Backpropagation)",
 }
 FRAMEWORK_STYLE = {
-    "Qiskit (roh)":              "-",
-    "Executor (Qiskit-Backend)": "-.",
+    "PennyLane (roh)":              "-",
+    "Executor (PennyLane-Backend)": "-.",
 }
 # Qubit-Zahl -> (Transparenz, Liniendicke): blass/dünn = wenige, kräftig/dick = viele
 QUBIT_STYLE = {
@@ -97,23 +129,23 @@ def main() -> None:
     # Für die Direkt-Beschriftung je Modus: Endpunkt der Linie mit dem größten x
     end_points = {mode: (0.0, 0.0) for mode in MODES}
 
-    for q, (qiskit_dir, exec_dir) in RUNS.items():
+    for q, run_cfg in RUNS.items():
         style = QUBIT_STYLE[q]
         for mode in MODES:
-            df_q = load(qiskit_dir, "qiskit", mode)
+            df_pl = load(run_cfg["pennylane_dir"], "benchmark", mode)
             ax.plot(
-                df_q["total_gates"], df_q["qc_mem_avg"],
-                linestyle=FRAMEWORK_STYLE["Qiskit (roh)"], color=MODE_COLOR[mode],
+                df_pl["total_gates"], df_pl["qnc_mem_avg"],
+                linestyle=FRAMEWORK_STYLE["PennyLane (roh)"], color=MODE_COLOR[mode],
                 **style,
             )
-            x_last, y_last = df_q["total_gates"].iloc[-1], df_q["qc_mem_avg"].iloc[-1]
+            x_last, y_last = df_pl["total_gates"].iloc[-1], df_pl["qnc_mem_avg"].iloc[-1]
             if x_last > end_points[mode][0]:
                 end_points[mode] = (x_last, y_last)
 
-            df_e = load(exec_dir, "benchmark_executor_qiskit", mode)
+            df_e = load(run_cfg["executor_dirs"][mode], "benchmark_executor_pennylane", mode)
             ax.plot(
                 df_e["total_gates"], df_e["qnc_mem_avg"],
-                linestyle=FRAMEWORK_STYLE["Executor (Qiskit-Backend)"], color=MODE_COLOR[mode],
+                linestyle=FRAMEWORK_STYLE["Executor (PennyLane-Backend)"], color=MODE_COLOR[mode],
                 **style,
             )
             x_last, y_last = df_e["total_gates"].iloc[-1], df_e["qnc_mem_avg"].iloc[-1]
@@ -125,7 +157,7 @@ def main() -> None:
     ax.set_xlabel("Anzahl Gatter", fontsize=12)
     ax.set_ylabel("Peak-Speicher (MiB)", fontsize=12)
     ax.set_title(
-        "Qiskit (roh) vs. Executor (Qiskit-Backend) – Speicherverbrauch (Peak) aller Modi "
+        "PennyLane (roh) vs. Executor (PennyLane-Backend) – Speicherverbrauch (Peak) aller Modi "
         f"und Qubit-Zahlen  |  Gate-Set: {GATE_SET}",
         fontsize=14, fontweight="bold", pad=14,
     )
@@ -172,7 +204,7 @@ def main() -> None:
 
     out_dir = ROOT / "final_plotted_results"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "qiskit_vs_executor_qubits_mem.png"
+    out_path = out_dir / "pennylane_vs_executor_qubits_mem.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Plot gespeichert: {out_path}")
 

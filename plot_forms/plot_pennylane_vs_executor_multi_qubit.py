@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-ROOT = Path(__file__).parent.parent.parent  # benchmarks/plot_forms/ -> Projekt-Wurzel
+ROOT = Path(__file__).parent.parent  # plot_forms/ -> Projekt-Wurzel
 
 # Qubit-Zahl -> {PennyLane-Roh-Lauf-Ordner, Executor(PennyLane)-Lauf-Ordner je Modus}
 RUNS = {

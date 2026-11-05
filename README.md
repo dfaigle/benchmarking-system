@@ -30,30 +30,27 @@ measures time and peak memory (`tracemalloc`) in three modes:
 
 ```
 benchmarks/
-  pennylane/               raw PennyLane benchmarks (gradient: backprop)
-    qnode_vs_tape/         PennyLane QNode vs. tape (side comparison)
-  qiskit/                  raw Qiskit benchmarks (gradient: parameter-shift)
-  abstract/                same benchmarks through the Executor (PennyLane or Qiskit backend)
-  plot_forms/              scripts that combine several runs into comparison plots
-raw_results/               CSVs + per-run plots, one folder per run (<timestamp>_qubits-<n>)
-final_plotted_results/     final comparison plots, these are the plots used in the thesis
-vendor/executor/           qc-executor as git submodule
+  pennylane_benchmark.py      raw PennyLane benchmark (gradient: backprop)
+  qiskit_benchmark.py         raw Qiskit benchmark (gradient: parameter-shift)
+  abstraction_benchmark.py    same benchmark through the Executor (PennyLane or Qiskit backend)
+  qnode_vs_tape_benchmark.py  PennyLane QNode vs. tape (side comparison)
+  plot_forms/                 scripts that combine several runs into comparison plots
+raw_results/                  CSVs + per-run plots, one folder per run (<timestamp>_qubits-<n>)
+final_plotted_results/        final comparison plots, these are the plots used in the thesis
+vendor/executor/              qc-executor as git submodule
 ```
 
-Each benchmark script exists once per qubit count (`_5`, `_8`, `_10`, `_12`).
-Gate set (`GATE_SET_CHOICE`), mode (`BENCHMARK_MODE`) and, for the executor,
-the backend (`BACKEND_CHOICE`) are set at the top of each script.
+There is one script per benchmark. Qubit count, gate set, mode etc. are passed
+as command-line flags (`python <script> --help` lists them):
 
-Further settings in the configuration block of each script:
-
-| Variable        | Meaning                                         | Default                                |
-|-----------------|-------------------------------------------------|----------------------------------------|
-| `QUBIT_CONFIGS` | qubit counts, e.g. `[5]`                        | matches the file suffix                |
-| `GATE_CONFIGS`  | gate counts, log-spaced via `np.logspace`       | 20 steps from 10 to 100,000 (`qnode_vs_tape`: 10,000) |
-| `REPEATS`       | repetitions per cell (avg/std/min/max in CSV)   | `4`                                    |
-
-To use fewer or more gates, change the bounds or the number of steps in
-`np.logspace(np.log10(10), np.log10(100000), 20)`.
+| Flag          | Meaning                                                      | Default                       |
+|---------------|--------------------------------------------------------------|-------------------------------|
+| `--framework` | backend of the Executor, `pennylane` or `qiskit` (**`abstraction_benchmark.py` only, required**) | none |
+| `--gates`     | gate set, e.g. `clifford`, `clifford_t`, `clifford_plus_non_clifford` (full list at the top of each script) | `clifford_plus_non_clifford` (`qnode_vs_tape`: `clifford`) |
+| `--mode`      | `creation`, `execution`, `gradient` or `all`                 | `all`                         |
+| `--qubits`    | one or more qubit counts, e.g. `--qubits 5 8 10 12`          | `5`                           |
+| `--max-gates` | largest gate count; 20 log-spaced steps from 10 up to this value | `100000` (`qnode_vs_tape`: `10000`) |
+| `--repeats`   | repetitions per cell (avg/std/min/max in CSV)                | `4`                           |
 
 ## Setup and usage
 
@@ -69,10 +66,14 @@ Running a benchmark or plot script — these are just examples, every script in
 `benchmarks/` is started the same way:
 
 ```bash
-python benchmarks/pennylane/logarithmic_benchmark_pennylane_5.py              # raw PennyLane, 5 qubits
-python benchmarks/abstract/logarithmic_benchmark_abstraction_pennylane_5.py   # same, through the Executor
-python benchmarks/plot_forms/plot_pennylane_vs_executor_multi_qubit.py        # comparison plot
+python benchmarks/pennylane_benchmark.py --qubits 5                              # raw PennyLane, 5 qubits
+python benchmarks/abstraction_benchmark.py --framework pennylane --qubits 5      # same, through the Executor
+python benchmarks/qiskit_benchmark.py --qubits 5 8 --mode gradient --max-gates 1000
+python benchmarks/plot_forms/plot_pennylane_vs_executor_multi_qubit.py           # comparison plot
 ```
+
+Several values for `--qubits` run one after another in the same process. To run
+qubit counts in parallel, start the script once per qubit count.
 
 Results are written to `raw_results/<Pennylane|Qiskit|Executor|TapeVsQNode>/`.
 The plot scripts read the run folders listed in their `RUNS` dict and write to
@@ -81,8 +82,10 @@ The plot scripts read the run folders listed in their `RUNS` dict and write to
 Long runs can also be started in Docker:
 
 ```bash
-./build_and_run.sh
+./build_and_run.sh                                                  # pennylane_benchmark.py, default flags
+./build_and_run.sh benchmarks/qiskit_benchmark.py --qubits 8 --mode gradient
+./build_and_run.sh benchmarks/abstraction_benchmark.py --framework pennylane --qubits 5 8 10 12
 ```
 
-It runs `benchmarks/pennylane/logarithmic_benchmark_pennylane_5.py`. For another
-benchmark, change that path in `build_and_run.sh`.
+The script and its flags are passed straight to `python` inside the container.
+`benchmarks/` is mounted read-only, results are written to `raw_results/` on the host.
