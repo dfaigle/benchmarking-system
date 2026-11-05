@@ -27,6 +27,7 @@ import gc
 import time
 import tracemalloc
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -58,7 +59,7 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "single_qubit_plus_cnot" → RX, RY, RZ, CNOT
 #  "rot_cnot"               → Rot, CNOT
 #
-# ACHTUNG Vergleichbarkeit mit logarithmic_benchmark_abstraction.py:
+# ACHTUNG Vergleichbarkeit mit abstraction_benchmark.py:
 # rng.choice zieht Indizes über die Gate-Liste. Nur wenn BEIDE Benchmarks
 # eine Liste gleicher Länge und Reihenfolge nutzen, entsteht bei gleichem
 # Seed dieselbe Gatter-Sequenz. Vergleichbare Sets: "clifford",
@@ -66,7 +67,7 @@ if hasattr(sys.stdout, "reconfigure"):
 # (dort "non_clifford") und "clifford_plus_non_clifford" (gleicher Name dort).
 # NICHT vergleichbar: "non_clifford" (10 statt 7 Gatter) und "rot_cnot".
 #
-GATE_SET_CHOICE = "clifford_plus_non_clifford"
+# Auswahl per --gates <name>  (Standard: "clifford_plus_non_clifford")
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -88,7 +89,40 @@ GATE_SET_CHOICE = "clifford_plus_non_clifford"
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner
 #
-BENCHMARK_MODE = "all"
+# Auswahl per Kommandozeile, siehe Block "Kommandozeilen-Argumente" unten.
+
+# =========================================================
+# ➤  Kommandozeilen-Argumente
+# =========================================================
+#  Beispiel:
+#    python qiskit_benchmark.py --qubits 8 --mode gradient --repeats 4 --max-gates 200
+#    python qiskit_benchmark.py --help
+#  Ohne Flags gelten die Standardwerte (= bisheriges Verhalten).
+
+parser = argparse.ArgumentParser(description="Qiskit-Benchmark")
+parser.add_argument("--gates", default="clifford_plus_non_clifford",
+                    help="Gate-Set (siehe Liste oben), Standard: %(default)s")
+parser.add_argument("--mode", default="all",
+                    choices=["creation", "execution", "gradient", "all"],
+                    help="Benchmark-Modus, Standard: %(default)s")
+parser.add_argument("--repeats", type=int, default=4,
+                    help="Wiederholungen pro Messpunkt, Standard: %(default)s")
+parser.add_argument("--qubits", type=int, nargs="+", default=[5],
+                    help="eine oder mehrere Qubit-Zahlen, z.B. --qubits 5 8, Standard: %(default)s")
+parser.add_argument("--max-gates", type=int, default=100000,
+                    help="maximale Gatter-Anzahl (logarithmisch ab 10), Standard: %(default)s")
+args = parser.parse_args()
+
+if args.max_gates <= 10:
+    parser.error("--max-gates muss größer als 10 sein")
+if args.repeats < 1:
+    parser.error("--repeats muss mindestens 1 sein")
+
+GATE_SET_CHOICE = args.gates
+BENCHMARK_MODE  = args.mode
+REPEATS         = args.repeats
+QUBIT_CONFIGS   = args.qubits
+MAX_GATES       = args.max_gates
 
 # =========================================================
 # Gate-Definitionen 
@@ -161,18 +195,16 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration
 # =========================================================
 
-# Datei liegt in Benchmarks/qiskit/ → drei Ebenen hoch zur Projekt-Wurzel.
-# (parent = qiskit/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
-RESULT_DIR = Path(__file__).parent.parent.parent / "raw_results" / "Qiskit"
+# Datei liegt in Benchmarks/ → zwei Ebenen hoch zur Projekt-Wurzel.
+# (parent = Benchmarks/, parent.parent = Wurzel)
+RESULT_DIR = Path(__file__).parent.parent / "raw_results" / "Qiskit"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
-REPEATS = 4
 
-QUBIT_CONFIGS = [12]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(MAX_GATES), 20)).astype(int)
 )
 
 # =========================================================
@@ -320,8 +352,8 @@ def runner_execution_qc(num_qubits: int, gate_sequence: list):
 #         der intern ebenfalls Estimator-basierten Param-Shift rechnet.
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
-# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py und
-# logarithmic_benchmark_abstraction.py synchron sein.
+# MUSS mit TRAINABLE_RATIO in pennylane_benchmark.py und
+# abstraction_benchmark.py synchron sein.
 TRAINABLE_RATIO = 0.3
 
 

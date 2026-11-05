@@ -2,7 +2,7 @@
 
 Eigenständiges Gegenstück zum reinen PennyLane-/Qiskit-Benchmark: hier läuft
 dieselbe Arbeit (creation / execution / gradient) über den ``Executor`` — einmal
-mit dem PennyLane-, einmal mit dem Qiskit-Backend (``BACKEND_CHOICE``).
+mit dem PennyLane-, einmal mit dem Qiskit-Backend (``--framework``).
 
 Der Aufbau ist bewusst IDENTISCH zum Roh-Framework-Benchmark (gleiche Gate-Sets,
 gleiche GATE_CONFIGS/QUBIT_CONFIGS, gleiche Mess-Methodik, gleiche CSV-Spalte
@@ -33,6 +33,7 @@ Roh-Benchmark (beide 7 Gatter, ohne T).
 Das Roh-Set "non_clifford" (mit Rot/Toffoli, 10 Gatter) ist NICHT vergleichbar.
 """
 
+import argparse
 import gc
 import sys
 import time
@@ -63,7 +64,7 @@ if hasattr(sys.stdout, "reconfigure"):
 #  "pennylane"  → Executor.create("pennylane")
 #  "qiskit"     → Executor.create("qiskit")
 #
-BACKEND_CHOICE = "pennylane"
+# Auswahl per --framework pennylane|qiskit  (Pflicht, kein Standardwert)
 
 # =========================================================
 # ➤  GATE-SET AUSWAHL  ←  hier anpassen
@@ -86,7 +87,7 @@ BACKEND_CHOICE = "pennylane"
 # Das Roh-Set "non_clifford" (10 Gatter, mit Rot/Toffoli) erzeugt eine ANDERE
 # Sequenz und ist NICHT vergleichbar.
 #
-GATE_SET_CHOICE = "clifford_plus_non_clifford"
+# Auswahl per --gates <name>  (Standard: "clifford_plus_non_clifford")
 
 # =========================================================
 # ➤  BENCHMARK-MODUS  ←  hier anpassen
@@ -103,11 +104,48 @@ GATE_SET_CHOICE = "clifford_plus_non_clifford"
 #  "all"       → alle drei Modi nacheinander (creation → execution → gradient);
 #                eigene CSV + Plots pro Modus, gemeinsamer run_<N>-Ordner.
 #
-BENCHMARK_MODE = "gradient"
+# Auswahl per Kommandozeile, siehe Block "Kommandozeilen-Argumente" unten.
 
 # Plots am Ende interaktiv anzeigen? Für Batch-/Headless-Läufe auf False setzen
 # (die PNGs werden unabhängig davon immer gespeichert).
 SHOW_PLOTS = True
+
+# =========================================================
+# ➤  Kommandozeilen-Argumente
+# =========================================================
+#  Beispiel:
+#    python abstraction_benchmark.py --framework qiskit --qubits 8 --mode gradient --max-gates 200
+#    python abstraction_benchmark.py --help
+#  --framework ist Pflicht, alle anderen Flags haben Standardwerte.
+
+parser = argparse.ArgumentParser(description="Executor-/Abstraktions-Benchmark")
+parser.add_argument("--framework", required=True,
+                    choices=["pennylane", "qiskit"],
+                    help="Backend für Executor.create() (Pflicht)")
+parser.add_argument("--gates", default="clifford_plus_non_clifford",
+                    help="Gate-Set (siehe Liste oben), Standard: %(default)s")
+parser.add_argument("--mode", default="all",
+                    choices=["creation", "execution", "gradient", "all"],
+                    help="Benchmark-Modus, Standard: %(default)s")
+parser.add_argument("--repeats", type=int, default=4,
+                    help="Wiederholungen pro Messpunkt, Standard: %(default)s")
+parser.add_argument("--qubits", type=int, nargs="+", default=[5],
+                    help="eine oder mehrere Qubit-Zahlen, z.B. --qubits 5 8, Standard: %(default)s")
+parser.add_argument("--max-gates", type=int, default=100000,
+                    help="maximale Gatter-Anzahl (logarithmisch ab 10), Standard: %(default)s")
+args = parser.parse_args()
+
+if args.max_gates <= 10:
+    parser.error("--max-gates muss größer als 10 sein")
+if args.repeats < 1:
+    parser.error("--repeats muss mindestens 1 sein")
+
+BACKEND_CHOICE  = args.framework
+GATE_SET_CHOICE = args.gates
+BENCHMARK_MODE  = args.mode
+REPEATS         = args.repeats
+QUBIT_CONFIGS   = args.qubits
+MAX_GATES       = args.max_gates
 
 # =========================================================
 # Gate-Definitionen  (kanonische Namen, kleingeschrieben)
@@ -168,18 +206,16 @@ print(f"Modus    : {BENCHMARK_MODE!r}\n")
 # Konfiguration  (identisch zum Roh-Benchmark)
 # =========================================================
 
-# Datei liegt in Benchmarks/abstract/ → drei Ebenen hoch zur Projekt-Wurzel.
-# (parent = abstract/, parent.parent = Benchmarks/, parent.parent.parent = Wurzel)
-RESULT_DIR = Path(__file__).parent.parent.parent / "raw_results" / "Executor"
+# Datei liegt in Benchmarks/ → zwei Ebenen hoch zur Projekt-Wurzel.
+# (parent = Benchmarks/, parent.parent = Wurzel)
+RESULT_DIR = Path(__file__).parent.parent / "raw_results" / "Executor"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED    = 42
-REPEATS = 4
 
-QUBIT_CONFIGS = [10]
 
 GATE_CONFIGS = np.unique(
-    np.round(np.logspace(np.log10(10), np.log10(100000), 20)).astype(int)
+    np.round(np.logspace(np.log10(10), np.log10(MAX_GATES), 20)).astype(int)
 )
 
 #: Präfix der gemessenen Linie — identisch zum Roh-Benchmark, damit die CSVs
@@ -265,7 +301,7 @@ def build_abstract(num_qubits: int, sequence: list) -> AbstractQuantumCircuit:
 
 
 # Anteil der Gatter, der im Gradient-Modus durch trainierbare RY ersetzt wird.
-# MUSS mit TRAINABLE_RATIO in logarithmic_benchmark_pennylane.py synchron sein,
+# MUSS mit TRAINABLE_RATIO in pennylane_benchmark.py synchron sein,
 # sonst bauen Roh- und Executor-Benchmark verschiedene Circuits und die
 # Overhead-Differenz (Executor − Roh) ist im Gradient-Modus ungültig.
 TRAINABLE_RATIO = 0.3
